@@ -1,0 +1,4 @@
+# Docker-only constraint. The local macOS workflow continues to use
+# requirements.txt unchanged. The local-version suffix forces pip to retain the
+# official CPU wheel while resolving sentence-transformers on Linux.
+torch==2.14.1+cpu

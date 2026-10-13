@@ -1,0 +1,28 @@
+{
+  "dataset_version": "generation-citation-v1",
+  "method": "offline_citation_verification",
+  "cases": 3,
+  "accuracy": 1.0,
+  "mean_latency_ms": 0.006,
+  "provider_cost_usd": null,
+  "rows": [
+    {
+      "id": "verified_claim",
+      "expected": "accept",
+      "outcome": "accept",
+      "latency_ms": 0.00808399636298418
+    },
+    {
+      "id": "fabricated_quote",
+      "expected": "reject",
+      "outcome": "reject",
+      "latency_ms": 0.004042056389153004
+    },
+    {
+      "id": "prompt_injection_text",
+      "expected": "accept",
+      "outcome": "accept",
+      "latency_ms": 0.004540896043181419
+    }
+  ]
+}

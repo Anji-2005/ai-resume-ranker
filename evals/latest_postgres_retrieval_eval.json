@@ -1,0 +1,84 @@
+{
+  "dataset_version": "synthetic-retrieval-v1",
+  "method": "postgres_native_fts_pgvector_rrf",
+  "metrics": {
+    "queries": 5,
+    "recall_at_5": 1.0,
+    "mrr": 0.9,
+    "ndcg_at_5": 0.9262,
+    "mean_latency_ms": 26.27,
+    "p95_latency_ms": 45.873
+  },
+  "per_query": [
+    {
+      "query_id": "q-api",
+      "ranked_chunk_ids": [
+        "doc-risk",
+        "doc-python",
+        "doc-sql",
+        "doc-js",
+        "doc-ml"
+      ],
+      "relevant_chunk_ids": [
+        "doc-python"
+      ],
+      "latency_ms": 45.873082941398025
+    },
+    {
+      "query_id": "q-bi",
+      "ranked_chunk_ids": [
+        "doc-sql",
+        "doc-risk",
+        "doc-python",
+        "doc-js",
+        "doc-cloud"
+      ],
+      "relevant_chunk_ids": [
+        "doc-sql"
+      ],
+      "latency_ms": 28.37258391082287
+    },
+    {
+      "query_id": "q-nlp",
+      "ranked_chunk_ids": [
+        "doc-ml",
+        "doc-risk",
+        "doc-sql",
+        "doc-js",
+        "doc-python"
+      ],
+      "relevant_chunk_ids": [
+        "doc-ml"
+      ],
+      "latency_ms": 13.717458001337945
+    },
+    {
+      "query_id": "q-infra",
+      "ranked_chunk_ids": [
+        "doc-cloud",
+        "doc-python",
+        "doc-sql",
+        "doc-js",
+        "doc-ml"
+      ],
+      "relevant_chunk_ids": [
+        "doc-cloud"
+      ],
+      "latency_ms": 19.558249972760677
+    },
+    {
+      "query_id": "q-fraud",
+      "ranked_chunk_ids": [
+        "doc-risk",
+        "doc-python",
+        "doc-ml",
+        "doc-sql",
+        "doc-js"
+      ],
+      "relevant_chunk_ids": [
+        "doc-risk"
+      ],
+      "latency_ms": 23.827249999158084
+    }
+  ]
+}

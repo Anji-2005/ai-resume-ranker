@@ -2,6 +2,8 @@
 
 import re
 
+from domain.schemas import ParsedDocument, SkillEvidence
+
 
 SKILL_ALIASES = {
     "Python": ["python"], "SQL": ["sql", "structured query language"],
@@ -76,6 +78,42 @@ def find_skill_evidence(text, skills, max_sentences=2):
     evidence = {}
     for skill in skills:
         evidence[skill] = [chunk for chunk in chunks if _contains_skill(chunk, skill)][:max_sentences]
+    return evidence
+
+
+def find_skill_evidence_with_provenance(document: ParsedDocument, skills, max_evidence=2):
+    """Return deterministic skill evidence with document offsets and provenance.
+
+    This complements the legacy ``find_skill_evidence`` string mapping. It
+    searches parser chunks, keeps the exact source excerpt, and de-duplicates
+    overlap introduced by the configurable chunk splitter.
+    """
+    sections = {section.section_id: section for section in document.sections}
+    evidence = {skill: [] for skill in skills}
+    seen_offsets = {skill: set() for skill in skills}
+    for chunk in document.chunks:
+        section = sections[chunk.section_id]
+        for match in re.finditer(r"[^.!?\r\n]+(?:[.!?]+|$)", chunk.text):
+            excerpt = match.group(0).strip()
+            if not excerpt:
+                continue
+            # Convert the stripped local excerpt back to an exact document span.
+            local_start = match.start() + len(match.group(0)) - len(match.group(0).lstrip())
+            local_end = local_start + len(excerpt)
+            for skill in skills:
+                if len(evidence[skill]) >= max_evidence or not _contains_skill(excerpt, skill):
+                    continue
+                source_start = chunk.source_start + local_start
+                source_end = chunk.source_start + local_end
+                offset_key = (source_start, source_end)
+                if offset_key in seen_offsets[skill]:
+                    continue
+                seen_offsets[skill].add(offset_key)
+                evidence[skill].append(SkillEvidence(
+                    skill=skill, excerpt=excerpt, source_start=source_start,
+                    source_end=source_end, section_id=section.section_id,
+                    chunk_id=chunk.chunk_id, page_number=section.page_number,
+                ))
     return evidence
 
 

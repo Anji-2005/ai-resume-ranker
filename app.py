@@ -18,7 +18,12 @@ from utils.candidate_analyzer import (
 from utils.matcher import MODEL_NAME, calculate_match_score, get_model
 from utils.genai_analyzer import clear_enrichment_cache, enrich_candidate, gemini_model_name
 from utils.pdf_parser import ResumeParseError, extract_text_from_bytes
-from utils.privacy import anonymize_resume_text, safe_candidate_label
+from utils.privacy import (
+    anonymize_resume_text,
+    safe_candidate_label,
+    safe_failure_record,
+    sanitize_audit_records,
+)
 from utils.scoring import calculate_score_breakdown, review_recommendation
 from utils.skills_extractor import extract_skills, find_skill_evidence, parse_skill_list
 
@@ -90,7 +95,7 @@ def analyze_resume(uploaded_file, index, job, model, genai_api_key=""):
     label = safe_candidate_label(uploaded_file.name, index, job["blind_review"])
     result = {
         "candidate": label,
-        "source_filename": uploaded_file.name,
+        "source_filename": label if job["blind_review"] else uploaded_file.name,
         "score": breakdown["final_score"],
         "components": breakdown["components"],
         "weights": breakdown["weights"],
@@ -261,18 +266,26 @@ with setup_tab:
                 model = None
             if model is not None:
                 for index, resume in enumerate(uploaded_resumes, start=1):
+                    display_name = safe_candidate_label(resume.name, index, job["blind_review"])
                     progress.progress(
                         (index - 1) / len(uploaded_resumes),
-                        text=f"Analyzing {index} of {len(uploaded_resumes)}: {resume.name}",
+                        text=f"Analyzing {index} of {len(uploaded_resumes)}: {display_name}",
                     )
                     try:
                         results.append(analyze_resume(
                             resume, index, job, model, genai_api_key=genai_api_key
                         ))
                     except ResumeParseError as exc:
-                        failures.append({"file": resume.name, "error": str(exc)})
+                        failures.append(safe_failure_record(
+                            resume.name, index, exc, job["blind_review"]
+                        ))
                     except Exception as exc:
-                        failures.append({"file": resume.name, "error": f"Unexpected analysis error: {exc}"})
+                        failures.append(safe_failure_record(
+                            resume.name,
+                            index,
+                            f"Unexpected analysis error: {exc}",
+                            job["blind_review"],
+                        ))
                 progress.progress(1.0, text="Analysis complete")
                 results.sort(key=lambda item: item["score"], reverse=True)
                 for rank, item in enumerate(results, start=1):
@@ -414,12 +427,17 @@ with results_tab:
             )
         except ImportError:
             download_cols[1].caption("Install openpyxl to enable Excel export.")
+        audit_results, audit_failures = sanitize_audit_records(
+            results,
+            failures,
+            bool(st.session_state.get("job_config", {}).get("blind_review", False)),
+        )
         audit = {
             "generated_at": st.session_state.get("audit_timestamp"),
             "model": MODEL_NAME,
             "job_configuration": st.session_state.get("job_config"),
-            "candidate_results": results,
-            "failed_files": failures,
+            "candidate_results": audit_results,
+            "failed_files": audit_failures,
         }
         download_cols[2].download_button(
             "Download audit JSON", json.dumps(audit, indent=2),

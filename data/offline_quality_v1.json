@@ -1,0 +1,18 @@
+{
+  "dataset_version": "offline-quality-v1",
+  "parser_cases": [
+    {"id": "docx-heading", "format": "docx", "heading": "Experience", "text": "Built Python APIs with PostgreSQL.", "expected_page": null},
+    {"id": "pdf-page", "format": "pdf", "text": "Built SQL dashboards for a fictional project.", "expected_page": 1}
+  ],
+  "redaction_cases": [
+    {"id": "direct-identifiers", "text": "Fictional Person\nfictional@example.com\n+91 98765 43210\nhttps://example.com/profile", "sensitive_values": ["Fictional Person", "fictional@example.com", "98765", "example.com/profile"]}
+  ],
+  "score_cases": [
+    {"id": "all-required", "semantic_score": 80, "resume_text": "Python and SQL delivery", "required_skills": ["Python", "SQL"], "preferred_skills": ["Docker"], "candidate_years": 3, "minimum_years": 5, "expected_final_score": 76.0},
+    {"id": "optional-disabled", "semantic_score": 50, "resume_text": "Python delivery", "required_skills": ["Python", "SQL"], "preferred_skills": [], "candidate_years": 0, "minimum_years": 0, "expected_final_score": 50.0}
+  ],
+  "structured_output_cases": [
+    {"id": "valid", "sensitive": false, "expected": "accept", "question": "How did you design the Python API?", "reason": "Verify the stated API work."},
+    {"id": "protected-topic", "sensitive": true, "expected": "reject", "question": "What is your age?", "reason": "Discuss age."}
+  ]
+}

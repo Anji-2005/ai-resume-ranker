@@ -1,0 +1,11 @@
+{
+  "dataset_version": "offline-quality-v1",
+  "method": "deterministic_offline_quality",
+  "parser_fidelity": 1.0,
+  "redaction_recall": 1.0,
+  "score_parity": 1.0,
+  "structured_output_accuracy": 1.0,
+  "sensitive_content_acceptance_rate": 0.0,
+  "latency_ms": 19.594,
+  "live_model_calls": 0
+}

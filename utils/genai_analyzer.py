@@ -1,10 +1,16 @@
-"""Optional, bounded Gemini enrichment for candidate review results."""
+"""Compatibility facade for baseline Gemini enrichment.
+
+Grounded recruiter briefs and document Q&A live in ``generation/``. This module
+keeps the existing Streamlit contract and deterministic fallback behavior.
+"""
 
 from collections import OrderedDict
 import hashlib
 import json
 import os
 from threading import Lock
+
+from generation.providers import DirectGeminiJsonProvider
 
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
@@ -291,12 +297,8 @@ def enrich_candidate(resume_text, job, analysis, api_key, model_name=None, clien
     }
     config = types.GenerateContentConfig(**config_values) if types else config_values
     try:
-        response = client.models.generate_content(
-            model=selected_model,
-            contents=_build_prompt(resume_text, job, analysis),
-            config=config,
-        )
-        payload = json.loads(response.text or "")
+        provider = DirectGeminiJsonProvider(client, selected_model, config)
+        payload = provider.generate(_build_prompt(resume_text, job, analysis))
         validated = validate_enrichment(payload, resume_text, job.get("required_skills", []))
     finally:
         if owns_client and hasattr(client, "close"):

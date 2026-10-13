@@ -6,10 +6,21 @@ import pandas as pd
 from docx import Document
 
 from utils.candidate_analyzer import estimate_years_experience
-from utils.pdf_parser import ResumeParseError, extract_text_from_bytes, validate_resume_file
-from utils.privacy import anonymize_resume_text, safe_candidate_label
+from utils.pdf_parser import (
+    ResumeParseError, extract_text_from_bytes, parse_document_from_bytes,
+    validate_resume_file,
+)
+from utils.privacy import (
+    anonymize_resume_text,
+    safe_candidate_label,
+    safe_failure_record,
+    sanitize_audit_records,
+)
 from utils.scoring import calculate_score_breakdown, normalize_weights, review_recommendation
-from utils.skills_extractor import extract_skills, find_skill_evidence, parse_skill_list
+from utils.skills_extractor import (
+    extract_skills, find_skill_evidence, find_skill_evidence_with_provenance,
+    parse_skill_list,
+)
 
 
 class SkillExtractionTests(unittest.TestCase):
@@ -66,6 +77,77 @@ class ParsingAndPrivacyTests(unittest.TestCase):
         document.save(output)
         self.assertIn("SQL analyst", extract_text_from_bytes("resume.docx", output.getvalue()))
 
+    def test_pdf_parse_has_page_sections_chunks_and_exact_offsets(self):
+        document = pymupdf.open()
+        first = document.new_page()
+        first.insert_text((72, 72), "Python analysis on page one")
+        second = document.new_page()
+        second.insert_text((72, 72), "SQL reporting on page two")
+        data = document.tobytes()
+        document.close()
+
+        parsed = parse_document_from_bytes("resume.pdf", data, chunk_size=12, chunk_overlap=3)
+
+        self.assertEqual(parsed.media_type, "application/pdf")
+        self.assertEqual([section.page_number for section in parsed.sections], [1, 2])
+        self.assertTrue(all(chunk.page_number in {1, 2} for chunk in parsed.chunks))
+        self.assertGreater(len(parsed.chunks), len(parsed.sections))
+        for section in parsed.sections:
+            self.assertEqual(parsed.text[section.source_start:section.source_end], section.text)
+        for chunk in parsed.chunks:
+            self.assertEqual(parsed.text[chunk.source_start:chunk.source_end], chunk.text)
+
+    def test_docx_parse_uses_heading_sections_without_invented_pages(self):
+        output = BytesIO()
+        document = Document()
+        document.add_heading("Experience", level=1)
+        document.add_paragraph("Built Python services and SQL reports.")
+        table = document.add_table(rows=1, cols=2)
+        table.cell(0, 0).text = "Skill"
+        table.cell(0, 1).text = "Python"
+        document.save(output)
+
+        parsed = parse_document_from_bytes("resume.docx", output.getvalue(), chunk_size=500)
+
+        self.assertIn("Experience", parsed.text)
+        self.assertIn("Built Python services", parsed.text)
+        self.assertIn("Skill\nPython", parsed.text)
+        self.assertTrue(any(section.kind == "heading" for section in parsed.sections))
+        self.assertTrue(any(section.kind == "table" for section in parsed.sections))
+        self.assertTrue(all(section.page_number is None for section in parsed.sections))
+        self.assertTrue(all(chunk.page_number is None for chunk in parsed.chunks))
+
+    def test_chunking_is_section_aware_and_configurable(self):
+        document = pymupdf.open()
+        for text in ("A" * 50, "B" * 50):
+            page = document.new_page()
+            page.insert_text((72, 72), text)
+        data = document.tobytes()
+        document.close()
+
+        parsed = parse_document_from_bytes("resume.pdf", data, chunk_size=20, chunk_overlap=5)
+        section_ids = {chunk.section_id for chunk in parsed.chunks}
+        self.assertEqual(section_ids, {"section-0001", "section-0002"})
+        self.assertTrue(all(len(chunk.text) <= 20 for chunk in parsed.chunks))
+        with self.assertRaises(ValueError):
+            parse_document_from_bytes("resume.pdf", data, chunk_size=10, chunk_overlap=10)
+
+    def test_structured_skill_evidence_has_exact_provenance(self):
+        document = pymupdf.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Built Python APIs. Used SQL for reporting.")
+        data = document.tobytes()
+        document.close()
+        parsed = parse_document_from_bytes("resume.pdf", data, chunk_size=500)
+
+        evidence = find_skill_evidence_with_provenance(parsed, ["Python", "SQL"])
+
+        self.assertEqual(evidence["Python"][0].page_number, 1)
+        self.assertEqual(evidence["SQL"][0].section_id, "section-0001")
+        for items in evidence.values():
+            for item in items:
+                self.assertEqual(parsed.text[item.source_start:item.source_end], item.excerpt)
+
     def test_excel_engine_is_available(self):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -80,6 +162,35 @@ class ParsingAndPrivacyTests(unittest.TestCase):
         self.assertNotIn("jane@example.com", redacted)
         self.assertNotIn("98765", redacted)
         self.assertEqual(safe_candidate_label("jane.pdf", 2, True), "Candidate 02")
+
+    def test_blind_review_records_do_not_expose_source_filenames(self):
+        filename = "jane-doe-private-resume.pdf"
+        failure = safe_failure_record(
+            filename, 1, f"Could not parse {filename}", blind_review=True
+        )
+        results, failures = sanitize_audit_records(
+            [{"candidate": "Candidate 01", "source_filename": filename}],
+            [{"file": filename, "error": f"Could not parse {filename}"}],
+            blind_review=True,
+        )
+
+        self.assertEqual(failure["file"], "Candidate 01")
+        self.assertNotIn(filename, str(failure))
+        self.assertEqual(results[0]["source_filename"], "Candidate 01")
+        self.assertEqual(failures[0]["file"], "Candidate 01")
+        self.assertNotIn(filename, str((results, failures)))
+
+    def test_non_blind_records_preserve_source_filenames(self):
+        filename = "fictional-resume.pdf"
+        failure = safe_failure_record(filename, 1, "parse failed", blind_review=False)
+        results, failures = sanitize_audit_records(
+            [{"candidate": filename, "source_filename": filename}],
+            [failure],
+            blind_review=False,
+        )
+
+        self.assertEqual(results[0]["source_filename"], filename)
+        self.assertEqual(failures[0]["file"], filename)
 
     def test_experience_requires_explicit_claim(self):
         self.assertEqual(estimate_years_experience("5 years of experience in analytics"), 5)
