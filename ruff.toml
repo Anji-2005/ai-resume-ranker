@@ -1,0 +1,7 @@
+target-version = "py314"
+
+[lint]
+# Keep CI's initial lint gate focused on correctness while the legacy Streamlit
+# code is incrementally formatted. Formatting/style expansion is a separate,
+# reviewable migration rather than an unrelated behavior change.
+select = ["E9", "F"]

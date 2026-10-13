@@ -1,0 +1,18 @@
+{
+  "dataset_version": "synthetic-retrieval-v1",
+  "documents": [
+    {"id": "doc-python", "text": "Built Python FastAPI services with PostgreSQL and Docker.", "chunk_id": "doc-python-chunk-1"},
+    {"id": "doc-sql", "text": "Designed SQL analytics pipelines and Tableau reporting dashboards.", "chunk_id": "doc-sql-chunk-1"},
+    {"id": "doc-ml", "text": "Developed PyTorch machine learning models for document classification.", "chunk_id": "doc-ml-chunk-1"},
+    {"id": "doc-cloud", "text": "Deployed Kubernetes workloads on AWS with Terraform and CI/CD.", "chunk_id": "doc-cloud-chunk-1"},
+    {"id": "doc-js", "text": "Created React and TypeScript interfaces for internal business tools.", "chunk_id": "doc-js-chunk-1"},
+    {"id": "doc-risk", "text": "Performed fraud detection and risk analysis using Python and SQL.", "chunk_id": "doc-risk-chunk-1"}
+  ],
+  "queries": [
+    {"id": "q-api", "text": "Python API and database experience", "relevant_chunk_ids": ["doc-python-chunk-1"], "relevant_source_keys": ["doc-python"]},
+    {"id": "q-bi", "text": "SQL dashboard analytics", "relevant_chunk_ids": ["doc-sql-chunk-1"], "relevant_source_keys": ["doc-sql"]},
+    {"id": "q-nlp", "text": "machine learning document classifier", "relevant_chunk_ids": ["doc-ml-chunk-1"], "relevant_source_keys": ["doc-ml"]},
+    {"id": "q-infra", "text": "Kubernetes AWS deployment", "relevant_chunk_ids": ["doc-cloud-chunk-1"], "relevant_source_keys": ["doc-cloud"]},
+    {"id": "q-fraud", "text": "Python fraud risk analysis", "relevant_chunk_ids": ["doc-risk-chunk-1"], "relevant_source_keys": ["doc-risk"]}
+  ]
+}

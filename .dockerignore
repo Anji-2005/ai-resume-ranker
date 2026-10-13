@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+.env
+.streamlit/secrets.toml
+*.pyc
+*.pyo
+*.pdf
+*.docx
+candidate_review*.csv
+candidate_review*.xlsx
+candidate_review*.json
