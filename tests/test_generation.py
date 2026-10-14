@@ -6,7 +6,8 @@ from generation.citations import CitationVerificationError, verify_answer
 from generation.schemas import GroundedAnswer
 from generation.service import GroundedGenerationService
 from retrieval.authorization import AuthorizationContext
-from retrieval.contracts import RetrievalCandidate, RetrievalContext
+from retrieval.context import build_context
+from retrieval.contracts import RetrievalCandidate
 
 
 def context():
@@ -15,7 +16,7 @@ def context():
         section_id="section-0001", content="Built Python APIs with PostgreSQL.", source_start=0,
         source_end=33, page_number=1, source_key="candidate-1", media_type="application/pdf",
     )
-    return RetrievalContext((candidate,), "[source_chunk_id=x]\n" + candidate.content, (str(candidate.chunk_id),))
+    return build_context([candidate])
 
 
 class FakePipeline:
@@ -121,6 +122,6 @@ def test_generation_trace_tracks_prompt_and_model_version_without_prompt_content
         AuthorizationContext("reviewer", frozenset({"tenant-a"})), "tenant-a", "Does this mention Go?"
     )
 
-    assert tracer.records[0]["prompt_version"] == "document-qa-v1"
+    assert tracer.records[0]["prompt_version"] == "document-qa-v2"
     assert tracer.records[0]["model_name"] == "fake-model-v1"
     assert "prompt" not in tracer.records[0]

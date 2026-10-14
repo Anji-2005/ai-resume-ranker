@@ -6,6 +6,6 @@
   "score_parity": 1.0,
   "structured_output_accuracy": 1.0,
   "sensitive_content_acceptance_rate": 0.0,
-  "latency_ms": 19.594,
+  "latency_ms": 43.018,
   "live_model_calls": 0
 }

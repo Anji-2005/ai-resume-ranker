@@ -1,205 +1,292 @@
-"""Focused HTTP API; authentication integration supplies the tenant header today."""
+"""Recruitment document intelligence HTTP API.
 
+Every candidate read, write, search, generation, or review requires a bearer
+token whose server-side grant covers the requested ``X-Tenant-ID``. Error details
+are fixed strings: exception text from parsers, validators, or providers is never
+echoed because it can contain candidate content.
+"""
+
+import hashlib
+from pathlib import PurePath
 from typing import Annotated
 from uuid import UUID
-import os
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile, status
+from sqlalchemy.exc import IntegrityError
 
-from db.session import get_session_factory
-from api.auth import get_retrieval_authorization
-from repositories.documents import DocumentRepository, IngestionResult
-from retrieval.authorization import AuthorizationContext, RetrievalAuthorizationError
+from api import presenters, schemas
+from api.dependencies import (
+    authorized,
+    get_database_status,
+    get_document_repository,
+    get_generation_provider,
+    get_generation_status,
+    get_retrieval_pipeline,
+    get_tenant_id,
+    require_generation_enabled,
+)
+from api.policy import GENERATION_ENABLED, gemini_api_key, gemini_model_name
+from api.workflows import router as workflow_router
+from generation.citations import CitationVerificationError
+from generation.service import (
+    GenerationOutputError,
+    GenerationProviderError,
+    GroundedGenerationService,
+    NoEvidenceError,
+)
+from repositories.documents import DocumentRepository, DocumentTooLargeError
+from retrieval.authorization import (
+    ROLE_EDITOR,
+    ROLE_READER,
+    AuthorizationContext,
+    RetrievalAuthorizationError,
+)
 from retrieval.contracts import MetadataFilters
 from retrieval.pipeline import RetrievalPipeline
-from generation.providers import LangChainGeminiProvider
-from generation.service import GroundedGenerationService
-from utils.pdf_parser import ResumeParseError
+from retrieval.reranker import CrossEncoderReranker
+from utils.matcher import MODEL_NAME
+from utils.pdf_parser import MAX_FILE_SIZE, ResumeParseError
 
 
-app = FastAPI(title="Recruitment Document Intelligence API", version="0.1.0")
+MAX_INGEST_CHUNKS = 500
+
+app = FastAPI(title="Recruitment Document Intelligence API", version=schemas.API_CONTRACT_VERSION)
+app.include_router(workflow_router)
+
+Reader = Annotated[AuthorizationContext, Depends(authorized(ROLE_READER))]
+Editor = Annotated[AuthorizationContext, Depends(authorized(ROLE_EDITOR))]
+Tenant = Annotated[str, Depends(get_tenant_id)]
+Repository = Annotated[DocumentRepository, Depends(get_document_repository)]
+Pipeline = Annotated[RetrievalPipeline, Depends(get_retrieval_pipeline)]
 
 
-class IngestResponse(BaseModel):
-    document_id: UUID
-    version_id: UUID
-    version_number: int
-    created: bool
-    embedding_model: str
+def _forbidden(exc: RetrievalAuthorizationError):
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
 
 
-class RetrievalResponse(BaseModel):
-    document_id: UUID
-    document_version_id: UUID
-    chunk_id: UUID
-    chunk_key: str
-    section_id: str
-    content: str
-    source_start: int
-    source_end: int
-    page_number: int | None
-    score: float
-    source_chunk_id: str
+@app.get("/v1/health", response_model=schemas.HealthResponse)
+def health(database: Annotated[str, Depends(get_database_status)]):
+    """Unauthenticated liveness and capability summary; contains no tenant data or secrets."""
+    return schemas.HealthResponse(
+        status="ok" if database == "ok" else "degraded", database=database,
+        generation_provider_configured=bool(gemini_api_key()), embedding_model=MODEL_NAME,
+        reranker_model=CrossEncoderReranker().model_name,
+    )
 
 
-class RecruiterBriefRequest(BaseModel):
-    description: str = Field(min_length=1, max_length=12_000)
-    required_skills: list[str] = Field(default_factory=list, max_length=50)
-    preferred_skills: list[str] = Field(default_factory=list, max_length=50)
-    source_key: list[str] = Field(default_factory=list, max_length=50)
-
-
-class DocumentQuestionRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=2_000)
-    source_key: list[str] = Field(default_factory=list, max_length=50)
-
-
-def get_tenant_id(x_tenant_id: Annotated[str, Header()]) -> str:
-    """Temporary tenant boundary until authentication supplies a trusted principal."""
-    if not x_tenant_id.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Tenant-ID is required")
-    return x_tenant_id.strip()
-
-
-def get_session():
-    session = get_session_factory()()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-
-
-def get_authorized_session(
-    tenant_id: Annotated[str, Depends(get_tenant_id)],
-    authorization: Annotated[AuthorizationContext, Depends(get_retrieval_authorization)],
+@app.get("/v1/session", response_model=schemas.SessionResponse)
+def session_info(
+    authorization: Reader, tenant_id: Tenant,
+    generation: Annotated[str, Depends(get_generation_status)],
 ):
-    """Authorize before creating a database session or touching a repository."""
+    return schemas.SessionResponse(
+        tenant_id=tenant_id, roles=sorted(authorization.roles), generation=generation,
+        generation_model=gemini_model_name() if generation == GENERATION_ENABLED else None,
+    )
+
+
+@app.get("/v1/documents", response_model=schemas.DocumentListResponse)
+def list_documents(
+    authorization: Reader, tenant_id: Tenant, repository: Repository,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    rows, total = repository.list_documents(tenant_id, limit=limit, offset=offset)
+    return schemas.DocumentListResponse(documents=[presenters.document_summary(row) for row in rows], total=total)
+
+
+async def _read_bounded(file: UploadFile) -> bytes:
+    data = await file.read(MAX_FILE_SIZE + 1)
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="The file exceeds the 10 MB size limit.")
+    return data
+
+
+def _opaque_filename(filename: str | None) -> str:
+    """Persist only the extension the parser needs, never an identity-bearing filename."""
+    return "document" + PurePath(filename or "").suffix.lower()
+
+
+def _ingest(repository: DocumentRepository, tenant_id: str, source_key: str, filename: str | None, data: bytes):
     try:
-        authorization.require_tenant(tenant_id)
-    except RetrievalAuthorizationError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    yield from get_session()
+        result = repository.ingest_bytes(
+            tenant_id, source_key, _opaque_filename(filename), data, max_chunks=MAX_INGEST_CHUNKS,
+        )
+        repository.session.flush()
+    except ResumeParseError as exc:
+        # Parser messages are fixed strings that never include document content.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="A concurrent upload of this document is in progress; retry.",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="The document could not be processed.",
+        ) from exc
+    return schemas.IngestResponse(**result.__dict__, candidate_ref=schemas.candidate_ref(result.document_id))
 
 
-@app.post("/v1/documents", response_model=IngestResponse, status_code=status.HTTP_201_CREATED)
+@app.post("/v1/documents", response_model=schemas.IngestResponse, status_code=status.HTTP_201_CREATED)
 async def ingest_document(
-    file: Annotated[UploadFile, File(...)],
-    source_key: Annotated[str, Form(...)],
-    tenant_id: Annotated[str, Depends(get_tenant_id)],
-    authorization: Annotated[AuthorizationContext, Depends(get_retrieval_authorization)],
-    session: Annotated[Session, Depends(get_authorized_session)],
+    authorization: Editor, tenant_id: Tenant,
+    file: Annotated[UploadFile, File(...)], repository: Repository,
+    source_key: Annotated[str | None, Form(max_length=256)] = None,
 ):
-    try:
-        authorization.require_tenant(tenant_id)
-        data = await file.read()
-        result = DocumentRepository(session).ingest_bytes(tenant_id, source_key, file.filename or "upload", data)
-    except RetrievalAuthorizationError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except (ResumeParseError, ValueError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return _ingestion_response(result)
+    data = await _read_bounded(file)
+    # Without a caller key, identical bytes map to one document: repeat uploads are idempotent.
+    key = (source_key or "").strip() or "doc-" + hashlib.sha256(data).hexdigest()[:24]
+    return _ingest(repository, tenant_id, key, file.filename, data)
 
 
-@app.get("/v1/documents/search", response_model=list[RetrievalResponse])
+def _search_filters(document_ids=(), source_keys=(), media_types=()):
+    return MetadataFilters(
+        document_ids=frozenset(document_ids), source_keys=frozenset(source_keys), media_types=frozenset(media_types),
+    )
+
+
+@app.get("/v1/documents/search", response_model=list[schemas.SearchResult])
 def search_documents(
+    authorization: Reader, tenant_id: Tenant,
     query: Annotated[str, Query(min_length=1, max_length=2_000)],
-    tenant_id: Annotated[str, Depends(get_tenant_id)],
-    authorization: Annotated[AuthorizationContext, Depends(get_retrieval_authorization)],
-    session: Annotated[Session, Depends(get_authorized_session)],
+    pipeline: Pipeline,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
     source_key: Annotated[list[str] | None, Query()] = None,
     media_type: Annotated[list[str] | None, Query()] = None,
     rerank: Annotated[bool, Query()] = False,
 ):
-    filters = MetadataFilters(source_keys=frozenset(source_key or []), media_types=frozenset(media_type or []))
+    """Compatibility route. Prefer ``POST /v1/documents/search`` so queries stay out of URLs."""
     try:
-        context = RetrievalPipeline(DocumentRepository(session)).retrieve(
-            authorization, tenant_id, query, filters=filters, limit=limit, use_reranker=rerank,
+        results = pipeline.search(
+            authorization, tenant_id, query, filters=_search_filters((), source_key or (), media_type or ()),
+            limit=limit, use_reranker=rerank,
         )
     except RetrievalAuthorizationError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    return [_retrieval_response(item) for item in context.candidates]
+        raise _forbidden(exc) from exc
+    return [presenters.search_result(item) for item in results]
 
 
-@app.delete("/v1/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_document(
-    document_id: UUID,
-    tenant_id: Annotated[str, Depends(get_tenant_id)],
-    authorization: Annotated[AuthorizationContext, Depends(get_retrieval_authorization)],
-    session: Annotated[Session, Depends(get_authorized_session)],
-):
+@app.post("/v1/documents/search", response_model=list[schemas.SearchResult])
+def search_documents_post(request: schemas.SearchRequest, authorization: Reader, tenant_id: Tenant, pipeline: Pipeline):
     try:
-        authorization.require_tenant(tenant_id)
+        results = pipeline.search(
+            authorization, tenant_id, request.query, filters=_search_filters(request.document_ids),
+            limit=request.limit, use_reranker=request.rerank,
+        )
     except RetrievalAuthorizationError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    if not DocumentRepository(session).delete_document(tenant_id, document_id):
+        raise _forbidden(exc) from exc
+    return [presenters.search_result(item) for item in results]
+
+
+@app.get("/v1/documents/{document_id}", response_model=schemas.DocumentDetail)
+def get_document(
+    document_id: UUID, authorization: Reader, tenant_id: Tenant, repository: Repository,
+    version: Annotated[int | None, Query(ge=1)] = None,
+):
+    document = repository.get_document(tenant_id, document_id)
+    if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
-
-
-@app.post("/v1/documents/recruiter-brief")
-def create_recruiter_brief(
-    request: RecruiterBriefRequest,
-    tenant_id: Annotated[str, Depends(get_tenant_id)],
-    authorization: Annotated[AuthorizationContext, Depends(get_retrieval_authorization)],
-    session: Annotated[Session, Depends(get_authorized_session)],
-):
-    try:
-        service = _grounded_service(session)
-        result = service.recruiter_brief(
-            authorization, tenant_id, request.model_dump(exclude={"source_key"}),
-            filters=MetadataFilters(source_keys=frozenset(request.source_key)),
-        )
-    except RetrievalAuthorizationError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return result.model_dump()
-
-
-@app.post("/v1/documents/qa")
-def answer_document_question(
-    request: DocumentQuestionRequest,
-    tenant_id: Annotated[str, Depends(get_tenant_id)],
-    authorization: Annotated[AuthorizationContext, Depends(get_retrieval_authorization)],
-    session: Annotated[Session, Depends(get_authorized_session)],
-):
-    try:
-        result = _grounded_service(session).answer_question(
-            authorization, tenant_id, request.question,
-            filters=MetadataFilters(source_keys=frozenset(request.source_key)),
-        )
-    except RetrievalAuthorizationError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return result.model_dump()
-
-
-def _ingestion_response(result: IngestionResult) -> IngestResponse:
-    return IngestResponse(**result.__dict__)
-
-
-def _retrieval_response(result) -> RetrievalResponse:
-    return RetrievalResponse(
-        document_id=result.document_id, document_version_id=result.document_version_id,
-        chunk_id=result.chunk_id, chunk_key=result.chunk_key, source_chunk_id=str(result.chunk_id),
-        section_id=result.section_id, content=result.content, source_start=result.source_start,
-        source_end=result.source_end, page_number=result.page_number,
-        score=result.reranker_score if result.reranker_score is not None else result.fusion_score,
+    versions = repository.list_versions(tenant_id, document_id)
+    current = next((row for row in versions if row.is_current), versions[0])
+    selected = version or current.version_number
+    if selected not in {row.version_number for row in versions}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document version not found")
+    chunks = repository.get_version_chunks(tenant_id, document_id, selected)
+    return schemas.DocumentDetail(
+        document_id=document.id, candidate_ref=schemas.candidate_ref(document.id), created_at=document.created_at,
+        versions=[presenters.version_info(row) for row in versions], selected_version_number=selected,
+        chunks=[presenters.chunk_view(chunk) for chunk in chunks],
     )
 
 
-def _grounded_service(session):
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is required for grounded generation")
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip() or "gemini-3.1-flash-lite"
-    return GroundedGenerationService(
-        LangChainGeminiProvider(api_key, model_name), RetrievalPipeline(DocumentRepository(session))
+@app.post(
+    "/v1/documents/{document_id}/versions", response_model=schemas.IngestResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_document_version(
+    document_id: UUID, authorization: Editor, tenant_id: Tenant,
+    file: Annotated[UploadFile, File(...)], repository: Repository,
+):
+    document = repository.get_document(tenant_id, document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+    data = await _read_bounded(file)
+    return _ingest(repository, tenant_id, document.source_key, file.filename, data)
+
+
+@app.delete("/v1/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(document_id: UUID, authorization: Editor, tenant_id: Tenant, repository: Repository):
+    if not repository.delete_document(tenant_id, document_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _generation_errors(exc: Exception) -> HTTPException:
+    if isinstance(exc, RetrievalAuthorizationError):
+        return _forbidden(exc)
+    if isinstance(exc, NoEvidenceError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="No authorized evidence was retrieved for the selected documents.",
+        )
+    if isinstance(exc, CitationVerificationError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Generated output failed citation verification and was withheld.",
+        )
+    if isinstance(exc, (GenerationProviderError, GenerationOutputError)):
+        return HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The generation provider did not return a usable response.",
+        )
+    raise exc
+
+
+GENERATION_ERRORS = (
+    RetrievalAuthorizationError, NoEvidenceError, CitationVerificationError,
+    GenerationProviderError, GenerationOutputError,
+)
+
+
+@app.post("/v1/documents/recruiter-brief", response_model=schemas.BriefResponse)
+def create_recruiter_brief(
+    request: schemas.BriefRequest, authorization: Reader, tenant_id: Tenant,
+    generation: Annotated[str, Depends(get_generation_status)],
+    pipeline: Pipeline, provider=Depends(get_generation_provider),
+):
+    """Unreviewed, citation-verified brief. The Streamlit UI uses the reviewed workflow instead."""
+    require_generation_enabled(generation)
+    try:
+        result = GroundedGenerationService(provider, pipeline).grounded_brief(
+            authorization, tenant_id, request.model_dump(include={"description", "required_skills", "preferred_skills"}),
+            filters=_search_filters(request.document_ids, request.source_key),
+        )
+    except GENERATION_ERRORS as exc:
+        raise _generation_errors(exc) from exc
+    return schemas.BriefResponse(
+        **result.output.model_dump(), sources=[presenters.supplied_source(item) for item in result.context.sources],
+        generation=presenters.generation_metadata(result),
+    )
+
+
+@app.post("/v1/documents/qa", response_model=schemas.GroundedAnswerResponse)
+def answer_document_question(
+    request: schemas.QuestionRequest, authorization: Reader, tenant_id: Tenant,
+    generation: Annotated[str, Depends(get_generation_status)],
+    pipeline: Pipeline, provider=Depends(get_generation_provider),
+):
+    require_generation_enabled(generation)
+    try:
+        result = GroundedGenerationService(provider, pipeline).grounded_answer(
+            authorization, tenant_id, request.question,
+            filters=_search_filters(request.document_ids, request.source_key),
+        )
+    except GENERATION_ERRORS as exc:
+        raise _generation_errors(exc) from exc
+    return schemas.GroundedAnswerResponse(
+        # All supplied sources are returned so reviewers can inspect cited and uncited evidence.
+        **result.output.model_dump(), sources=[presenters.supplied_source(item) for item in result.context.sources],
+        generation=presenters.generation_metadata(result) if result.context.sources else None,
     )

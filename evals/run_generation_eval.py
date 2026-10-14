@@ -8,7 +8,8 @@ from uuid import uuid4
 
 from generation.citations import CitationVerificationError, verify_answer
 from generation.schemas import GroundedAnswer
-from retrieval.contracts import RetrievalCandidate, RetrievalContext
+from retrieval.context import build_context
+from retrieval.contracts import RetrievalCandidate
 
 
 def evaluate(dataset_path):
@@ -20,12 +21,15 @@ def evaluate(dataset_path):
             section_id="eval", content=case["source"], source_start=0, source_end=len(case["source"]),
             page_number=None, source_key="eval", media_type="text/plain",
         )
+        # Optional fields exercise canonical-ID and context-budget boundaries.
+        citation_id = candidate.chunk_key if case.get("citation_id") == "chunk_key" else candidate.source_id
         answer = GroundedAnswer.model_validate({"claims": [{"text": case["claim"], "citations": [{
-            "source_chunk_id": str(candidate.chunk_id), "quote": case["quote"]
+            "source_chunk_id": citation_id, "quote": case["quote"]
         }]}]})
+        context = build_context([candidate], max_characters=case.get("max_characters", 8_000))
         started = perf_counter()
         try:
-            verify_answer(answer, RetrievalContext((candidate,), candidate.content, (str(candidate.chunk_id),)))
+            verify_answer(answer, context)
             outcome = "accept"
         except CitationVerificationError:
             outcome = "reject"

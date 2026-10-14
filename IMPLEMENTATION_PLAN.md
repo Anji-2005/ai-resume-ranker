@@ -161,3 +161,11 @@ PostgreSQL/pgvector integration tests against the disposable
 the synthetic quality gate passed, and the CPU-only Docker API completed the
 document smoke flow. Exact measured results and remaining release limitations
 are recorded in `EVALUATION_RESULTS.md`.
+
+## Streamlit integration note — 2026-10-14
+
+Milestones 4–6 are now exposed through Streamlit: a typed API client, document
+library, hybrid search, grounded Q&A, and the LangGraph review lifecycle over
+HTTP (`0003_workflow_runs`). Ranking remains the deterministic in-session path
+(milestone 3's score snapshots and review events are still not implemented).
+Executed results are in `EVALUATION_RESULTS.md` under "Streamlit integration validation".

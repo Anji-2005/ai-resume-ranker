@@ -1,5 +1,5 @@
 {
-  "dataset_version": "generation-citation-v1",
+  "dataset_version": "generation-citation-v2",
   "cases": [
     {
       "id": "verified_claim",
@@ -21,6 +21,37 @@
       "claim": "The document describes SQL dashboards.",
       "quote": "Built SQL dashboards",
       "expected": "accept"
+    },
+    {
+      "id": "truncated_tail_quote",
+      "source": "Led Python migration. Led Python migration. Managed a Kubernetes platform team.",
+      "claim": "The candidate managed a Kubernetes team.",
+      "quote": "Kubernetes platform team",
+      "max_characters": 95,
+      "expected": "reject"
+    },
+    {
+      "id": "truncated_head_quote",
+      "source": "Led Python migration. Led Python migration. Managed a Kubernetes platform team.",
+      "claim": "The candidate led a Python migration.",
+      "quote": "Led Python migration.",
+      "max_characters": 95,
+      "expected": "accept"
+    },
+    {
+      "id": "chunk_key_as_citation_id",
+      "source": "Built Python APIs with PostgreSQL.",
+      "claim": "The document describes Python API work.",
+      "quote": "Built Python APIs",
+      "citation_id": "chunk_key",
+      "expected": "reject"
+    },
+    {
+      "id": "redacted_identifier_quote",
+      "source": "Contact jane.doe@example.com about the Python API project.",
+      "claim": "The document lists an email.",
+      "quote": "jane.doe@example.com",
+      "expected": "reject"
     }
   ]
 }

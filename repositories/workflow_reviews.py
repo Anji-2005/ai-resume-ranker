@@ -22,3 +22,8 @@ class WorkflowReviewRepository:
         self.session.add(review)
         self.session.flush()
         return review, True
+
+    def get(self, *, tenant_id, workflow_id):
+        return self.session.scalar(select(WorkflowReview).where(
+            WorkflowReview.tenant_id == tenant_id, WorkflowReview.workflow_id == workflow_id
+        ))

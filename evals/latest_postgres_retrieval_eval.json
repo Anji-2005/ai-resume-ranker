@@ -6,8 +6,8 @@
     "recall_at_5": 1.0,
     "mrr": 0.9,
     "ndcg_at_5": 0.9262,
-    "mean_latency_ms": 26.27,
-    "p95_latency_ms": 45.873
+    "mean_latency_ms": 35.764,
+    "p95_latency_ms": 63.171
   },
   "per_query": [
     {
@@ -22,7 +22,7 @@
       "relevant_chunk_ids": [
         "doc-python"
       ],
-      "latency_ms": 45.873082941398025
+      "latency_ms": 63.17058298736811
     },
     {
       "query_id": "q-bi",
@@ -36,7 +36,7 @@
       "relevant_chunk_ids": [
         "doc-sql"
       ],
-      "latency_ms": 28.37258391082287
+      "latency_ms": 35.65829200670123
     },
     {
       "query_id": "q-nlp",
@@ -50,7 +50,7 @@
       "relevant_chunk_ids": [
         "doc-ml"
       ],
-      "latency_ms": 13.717458001337945
+      "latency_ms": 16.954416991211474
     },
     {
       "query_id": "q-infra",
@@ -64,7 +64,7 @@
       "relevant_chunk_ids": [
         "doc-cloud"
       ],
-      "latency_ms": 19.558249972760677
+      "latency_ms": 26.668000034987926
     },
     {
       "query_id": "q-fraud",
@@ -78,7 +78,7 @@
       "relevant_chunk_ids": [
         "doc-risk"
       ],
-      "latency_ms": 23.827249999158084
+      "latency_ms": 36.36758297216147
     }
   ]
 }

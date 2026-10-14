@@ -49,3 +49,17 @@ def sanitize_audit_records(results, failures, blind_review):
         if original:
             failure["error"] = str(failure.get("error", "")).replace(original, label)
     return safe_results, safe_failures
+
+
+def redact_direct_identifiers(text, at_document_start=False):
+    """Mask common direct identifiers in a chunk without the whole-document name heuristic.
+
+    The first-line name heuristic only makes sense for a distinct header line at the
+    very start of a document, so it applies only when the chunk begins at offset 0
+    and has more than one line.
+    """
+    if at_document_start and "\n" in (text or ""):
+        return anonymize_resume_text(text)
+    cleaned = EMAIL_RE.sub("[EMAIL REDACTED]", text or "")
+    cleaned = PHONE_RE.sub("[PHONE REDACTED]", cleaned)
+    return URL_RE.sub("[URL REDACTED]", cleaned)

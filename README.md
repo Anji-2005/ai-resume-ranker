@@ -1,49 +1,114 @@
-# Resume Review Assistant
+# Resume Review Assistant — Recruitment Document Intelligence
 
-An explainable, human-in-the-loop Streamlit application that helps recruiters
-prioritize resumes against explicitly configured job criteria. It combines
-semantic similarity with required skills, preferred skills, and experience while
-showing the evidence and score breakdown behind every result.
+An explainable, human-in-the-loop recruitment document workspace. A Streamlit
+dashboard combines the original **deterministic, explainable candidate ranking**
+with a V2 **FastAPI + PostgreSQL/pgvector** backend for persistent resume
+storage, **hybrid retrieval**, **citation-verified grounded generation**, and a
+durable **LangGraph human-review workflow**.
 
-> This application is a decision-support prototype. It does not make hiring
-> decisions and should never be used as the sole basis for an employment action.
+> This application is a decision-support prototype. It prioritizes documents for
+> human review and helps reviewers find evidence. It never makes, recommends, or
+> records hiring decisions, and must never be the sole basis for an employment action.
+
+## Problem
+
+Recruiters reviewing many resumes need to (1) prioritize against explicit
+criteria without a black box, (2) find specific evidence quickly, and (3) use AI
+assistance without trusting fluent but unsupported text. This project keeps
+scoring deterministic and inspectable, uses retrieval for evidence rather than
+ranking, and accepts AI output only when every claim cites an exact excerpt of
+the evidence the model was actually given — followed by a recorded human review.
 
 ## Features
 
-- Lazy, cached Sentence Transformer loading with visible progress
-- Weighted and fully visible score components
-- Required and preferred skill criteria with alias-aware matching
-- Resume evidence snippets for matched skills
-- PDF and DOCX support with signature, size, and document limits
-- Detection of scanned or text-empty PDFs
-- Per-file error isolation for batch processing
-- Blind-review mode for common direct identifiers
-- Candidate filtering and side-by-side comparison
-- CSV, Excel, and JSON audit exports
-- Optional Gemini-generated candidate summaries and personalized resume suggestions
-- Optional Gemini-generated interview questions and requirement evidence explanations
-- Explicit methodology, safeguards, and limitations
-- Automated unit and Streamlit rendering tests
-- Versioned document/chunk provenance, PostgreSQL/pgvector persistence, native
-  PostgreSQL lexical search, dense retrieval, RRF fusion, and optional reranking
-- Citation-verified structured generation and one bounded LangGraph human-review workflow
-- FastAPI document API with fail-closed token-to-tenant authorization
-- Offline quality gates, privacy-safe traces, SBOM generation, and dependency auditing
-- Container access logs disabled so confidential query strings are not persisted
+**Candidate Ranking (works in both modes)**
+- Weighted, fully visible score: semantic similarity (local MiniLM), required and
+  preferred skill coverage, explicitly stated experience
+- Skill evidence snippets, review cautions, candidate filtering, side-by-side comparison
+- Blind-review mode (default on): direct-identifier redaction and opaque candidate labels
+- In-session human review records; CSV, Excel, and blind-safe audit JSON exports
+- Optional original Gemini enrichment with rule-based fallbacks (never changes scores)
 
-## Architecture and technology
+**V2 Connected mode**
+- **Resume Library** — batch PDF/DOCX upload with per-file status, idempotent
+  re-upload, immutable versions, chunk-level provenance (page, section, offsets),
+  version history, new-version upload, and confirmed physical deletion
+- **AI Candidate Search** — pgvector cosine + PostgreSQL full-text search fused
+  with reciprocal-rank fusion, optional cross-encoder reranking, document filters,
+  retrieval diagnostics, and a no-LLM requirement evidence lookup
+- **Ask AI** — grounded Q&A with numbered citations that expand to the exact
+  highlighted excerpt, explicit uncertainty, and no-evidence states
+- **Recruiter Briefs** — one bounded LangGraph workflow per document: evidence
+  summary, requirement-by-requirement evidence, grounded interview questions,
+  then a human approves or rejects the AI-generated notes
+- **Review History** — durable, resumable review sessions backed by PostgreSQL checkpoints
 
-The unchanged Streamlit flow remains the deterministic review UI. The V2 service
-path uses FastAPI, SQLAlchemy/Alembic, PostgreSQL 16 with pgvector, MiniLM
-embeddings, PostgreSQL native full-text ranking, reciprocal-rank fusion,
-LangChain structured Gemini integration, and one LangGraph workflow. Documents
-flow through validation → provenance parsing → section-aware chunking → embedding
-and indexing → authorized retrieval → optional citation-verified generation →
-human review. See [ARCHITECTURE.md](ARCHITECTURE.md) for boundaries and caveats.
+**Safeguards**
+- Fail-closed token-to-tenant authorization with reader/editor/reviewer roles on every candidate route
+- Per-tenant generation policy gate: no candidate text reaches a provider without a configured key *and* a documented provider/purpose/retention policy
+- Filenames never stored or returned; opaque `CAND-xxxxxxxx` labels everywhere
+- Direct identifiers (email, phone, URL, header name) redacted from model context and V2 display text
+- One canonical citation ID; quotes verified only against text actually supplied to the model
+- Model output escaped before rendering (no generated links/images/HTML); search queries sent in POST bodies, not URLs
+- No access logs, no prompt/resume logging, Streamlit usage telemetry disabled
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph UI[Streamlit app.py]
+    R[Candidate Ranking<br/>services/ranking.py]
+    V[Library · Search · Ask AI<br/>Briefs · Review History]
+    C[frontend/api_client.py<br/>typed httpx client]
+  end
+  R -->|in-process| U[utils/: parser, MiniLM,<br/>skills, scoring, privacy]
+  V --> C -->|HTTP + bearer token<br/>X-Tenant-ID| A
+  subgraph API[FastAPI api/]
+    A[auth + tenant/role checks] --> D[documents & search]
+    A --> G[grounded generation<br/>policy gate]
+    A --> W[workflow lifecycle]
+  end
+  D --> P[(PostgreSQL 16 + pgvector<br/>documents · versions · chunks)]
+  D --> RP[retrieval/: dense + FTS → RRF → rerank]
+  RP --> P
+  G --> RP
+  G --> CTX[build_context: budget + redaction] --> LLM[LangChain Gemini<br/>structured output]
+  LLM --> CV[citation verification]
+  W --> LG[LangGraph RecruiterBriefWorkflow] --> CK[(PostgresSaver checkpoints<br/>workflow_runs · workflow_reviews)]
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow, boundaries, and caveats.
+
+## Technology
+
+Python 3.14 · Streamlit 1.62 · FastAPI · Pydantic v2 · SQLAlchemy 2 + Alembic ·
+PostgreSQL 16 + pgvector (HNSW) · sentence-transformers (all-MiniLM-L6-v2,
+ms-marco-MiniLM cross-encoder) · LangChain (`langchain-google-genai`) ·
+LangGraph + `langgraph-checkpoint-postgres` · httpx · Docker Compose · pytest · Ruff
+
+## Main workflows
+
+1. **Upload & manage** — Resume Library → upload synthetic PDFs/DOCX → per-file
+   results → inspect versions and provenance → upload a new version or delete.
+2. **Rank** — Candidate Ranking → job description, required/preferred skills,
+   minimum years → analyze → explainable breakdown, evidence, comparison, human
+   review, exports. Optionally also index the same files into the library.
+3. **Search** — AI Candidate Search → natural-language query, optional document
+   filter and reranking → passages with candidate label, page, offsets, and RRF scores.
+4. **Ask** — Ask AI → question → cited claims; expand a citation to see the exact
+   highlighted excerpt and its provenance.
+5. **Brief & review** — Recruiter Briefs → select documents and requirements →
+   workflow pauses for review → approve or reject the notes with an optional note
+   → revisit in Review History.
+
+### Screenshots
+
+Screenshots are not committed (they could capture candidate data). To produce
+them with synthetic data: start the stack, upload fictional resumes, then
+capture Overview, Resume Library, Candidate Ranking (Results tab), AI Candidate
+Search, Ask AI, and Recruiter Briefs at 1440×900.
 
 ## Scoring
-
-The default score is composed of:
 
 | Component | Default weight | Meaning |
 |---|---:|---|
@@ -55,287 +120,207 @@ The default score is composed of:
 Weights are configurable and normalized automatically. If preferred skills or a
 minimum-experience requirement are not configured, their weights are removed and
 the remaining components are renormalized. Skill mentions demonstrate textual
-evidence, not proficiency; a human reviewer must inspect the supporting context.
+evidence, not proficiency. **Search relevance and generated text never feed the
+score.** `tests/test_ranking_regression.py` pins scores, components, and order to
+output captured from the pre-integration `app.py`.
 
-## Local installation
+## Running locally
 
-Python 3.10–3.14 is recommended.
+### Option A — full stack with Docker Compose (V2 Connected mode)
 
 ```bash
-cd /path/to/ai-resume-ranker
+cp .env.example .env
+# Edit .env: set POSTGRES_PASSWORD, put one long random token in BOTH
+# RETRIEVAL_AUTH_TOKENS_JSON and API_BEARER_TOKEN (same tenant as API_TENANT_ID).
+docker compose up --build
+```
+
+- Streamlit: http://localhost:8501 · API: http://localhost:8000 (OpenAPI at `/docs`)
+- Containers talk over internal service names (`streamlit → http://api:8000 → postgres:5432`).
+- The API applies Alembic migrations on start. Models download on first use into
+  the `model_cache` volume.
+- Status: `docker compose ps`; logs: `docker compose logs --tail=100 api streamlit`.
+- Reset all stored data: `docker compose down -v` (deletes the database and model cache volumes).
+- Source-mounted development: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build`.
+
+To enable grounded generation for a **synthetic** demo, set `GEMINI_API_KEY` and a
+tenant policy, e.g.
+`GENERATION_TENANT_POLICY_JSON={"demo-tenant":{"provider":"gemini","purpose":"demo","retention":"synthetic data only"}}`.
+Without both, Ask AI and Recruiter Briefs show why generation is disabled; search
+and ranking keep working.
+
+### Option B — Standalone Streamlit (no database)
+
+```bash
 python3 -m venv ../ai-resume-ranker-venv
 source ../ai-resume-ranker-venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Open `http://localhost:8501`. The language model is downloaded when the first
-analysis starts and cached for later use; the initial download requires internet
-access.
+With `API_BASE_URL` unset, the app runs in **Standalone mode**: Candidate Ranking
+is fully functional and V2 pages explain how to connect. Nothing is saved.
 
-## Local document API and PostgreSQL
+### Option C — local API + Streamlit without Compose for the app
 
-The existing Streamlit app remains standalone. The optional document-intelligence
-API adds tenant-scoped, versioned document storage and retrieval without changing
-the current scoring path.
+Start PostgreSQL (e.g. `docker compose up postgres`), then:
 
 ```bash
-cp .env.example .env
-# Edit .env: choose a unique local POSTGRES_PASSWORD and retrieval token.
-docker compose up --build
+export DATABASE_URL=... RETRIEVAL_AUTH_TOKENS_JSON='{"<token>":["demo-tenant"]}'
+alembic upgrade head && uvicorn api.main:app --port 8000 --no-access-log
+# second shell
+API_BASE_URL=http://localhost:8000 API_TENANT_ID=demo-tenant API_BEARER_TOKEN=<token> streamlit run app.py
 ```
 
-This starts PostgreSQL, applies the migration, and serves the API at
-`http://localhost:8000`; interactive OpenAPI documentation is at `/docs`.
-The default Compose file deliberately has no source bind mount or auto-reload.
-For local API editing only, use `docker compose -f docker-compose.yml -f
-docker-compose.dev.yml up --build`. `.env` is ignored by Git and secrets are
-passed at container runtime, never copied into the image.
-The API image installs `torch==2.14.1+cpu` from PyTorch's official CPU wheel
-index; local macOS installation continues to use `requirements.txt` normally.
-Check service health with `docker compose ps` and logs with
-`docker compose logs --tail=100 api postgres`.
+### Troubleshooting
 
-The focused API requires `X-Tenant-ID` and `Authorization: Bearer <token>` on
-every document operation:
+| Symptom | Cause / fix |
+|---|---|
+| Sidebar shows **V2 unavailable** · "rejected the server-side credentials" | `API_BEARER_TOKEN` is not a key in `RETRIEVAL_AUTH_TOKENS_JSON` |
+| "not authorized for this operation or workspace" | Token lacks `API_TENANT_ID` or the needed role (editor/reviewer) |
+| "database is unavailable" | PostgreSQL not healthy or `DATABASE_URL` wrong; check `docker compose ps` |
+| Ask AI says generation is disabled | Missing `GEMINI_API_KEY` on the **API** or missing tenant policy |
+| First search/rerank is slow | MiniLM / cross-encoder downloading into the model cache |
+| `POSTGRES_PASSWORD` error on `compose up` | `.env` missing; copy `.env.example` |
 
-- `POST /v1/documents` — multipart `file` plus stable opaque `source_key`.
-  Repeating identical bytes for the same tenant/source key is idempotent; changed
-  bytes create a new immutable document version.
-- `GET /v1/documents/search?query=...&limit=10` — tenant-filtered hybrid
-  full-text + pgvector retrieval returning chunks with source offsets and pages.
-- `DELETE /v1/documents/{document_id}` — tenant-filtered physical deletion of
-  document versions and vectors through cascading foreign keys.
-- `POST /v1/documents/recruiter-brief` — authorized, citation-verified review
-  claims, requirement evidence, and interview questions.
-- `POST /v1/documents/qa` — authorized, citation-verified document Q&A.
+## API
 
-The local fail-closed adapter checks `RETRIEVAL_AUTH_TOKENS_JSON`, for example
-`{"local-demo-token":["demo-tenant"]}`. This is a development adapter only;
-production must replace it with authenticated principal/tenant claims from the
-deployment identity provider. The requested `X-Tenant-ID` is never accepted as
-retrieval authority by itself.
+All candidate routes require `Authorization: Bearer <token>` and `X-Tenant-ID`;
+the token's server-side grant — not the header — is the authority.
 
-Grounded generation uses the optional `langchain-google-genai` adapter for
-Pydantic structured output, then verifies every model citation locally against
-authorized retrieved chunks. The original direct `google-genai` enrichment path
-in `utils/genai_analyzer.py` remains the Streamlit compatibility baseline and
-its deterministic fallbacks remain unchanged. Generated material is limited to
-human review support: it cannot alter deterministic scores/ranks or make hiring
-decisions.
-
-## Controlled recruiter-brief workflow
-
-`workflows/recruiter_brief.py` defines one bounded LangGraph workflow:
-authorize → retrieve permitted evidence → validate job requirements → generate
-brief → verify citations → interrupt for human brief review → persist the
-reviewed brief. It has no autonomous hiring or rejection branch and does not
-change deterministic scoring. Existing Streamlit review remains its compatible,
-in-session path; the workflow is available to service/API integrations that need
-durable review sessions.
-
-Production workflow runs must use `workflows.checkpointing.postgres_checkpointer`
-with `DATABASE_URL`; it initializes LangGraph's PostgreSQL checkpoint tables and
-uses a stable `thread_id` to resume review. `LANGGRAPH_STRICT_MSGPACK=true` is
-set by default to restrict checkpoint deserialization. `InMemorySaver` is used
-only by tests. Human review resumes with `Command(resume={"approved": true,
-"note": "..."})`; the review record is idempotent by `(tenant_id, workflow_id)`.
-
-Environment variables:
-
-| Variable | Purpose | Default |
+| Method & path | Role | Purpose |
 |---|---|---|
-| `DATABASE_URL` | SQLAlchemy PostgreSQL connection URL for API/Alembic | required outside Compose |
-| `DATABASE_POOL_SIZE` | Persistent connection pool size | `5` |
-| `DATABASE_MAX_OVERFLOW` | Temporary connection overflow | `10` |
-| `DATABASE_ECHO` | Emit SQL for local debugging only | `false` |
-| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT` | Docker Compose PostgreSQL settings | values in `.env.example` |
-| `TEST_DATABASE_URL` | Isolated pgvector database used only by integration tests | unset; tests skip |
-| `RETRIEVAL_AUTH_TOKENS_JSON` | JSON token-to-permitted-tenant mapping for local search authorization | `{}` (fails closed) |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | Existing optional enrichment configuration | unchanged |
-| `GENAI_INPUT_USD_PER_MILLION_TOKENS`, `GENAI_OUTPUT_USD_PER_MILLION_TOKENS` | Optional trace cost-rate inputs; estimates use characters ÷ 4 | unset, so cost is reported as unavailable |
+| `GET /v1/health` | none | Liveness, DB reachability, configured capabilities (no tenant data) |
+| `GET /v1/session` | reader | Tenant, roles, generation status for the tenant |
+| `GET /v1/documents` | reader | Document summaries (`candidate_ref`, versions, chunk counts) |
+| `POST /v1/documents` | editor | Upload; idempotent by content when `source_key` is omitted |
+| `GET /v1/documents/{id}?version=` | reader | Version history and redacted chunks with provenance |
+| `POST /v1/documents/{id}/versions` | editor | Upload a new version |
+| `DELETE /v1/documents/{id}` | editor | Physical deletion of versions, chunks, vectors |
+| `POST /v1/documents/search` | reader | Hybrid retrieval (`GET` kept for compatibility) |
+| `POST /v1/documents/qa` | reader + policy | Citation-verified Q&A with supplied sources |
+| `POST /v1/documents/recruiter-brief` | reader + policy | Unreviewed citation-verified brief (API only) |
+| `POST /v1/workflows/recruiter-brief` | reader + policy | Start one review workflow per document (≤5) |
+| `GET /v1/workflows[?status=]` · `GET /v1/workflows/{id}` | reader | History; status, pending brief, final review |
+| `POST /v1/workflows/{id}/review` | reviewer | Approve/reject AI-generated notes; 409 if not pending |
 
-Never point `TEST_DATABASE_URL` at a shared or production database: the suite
-truncates its document tables.
+## Environment variables
 
-## Retrieval evaluation
+| Variable | Used by | Purpose | Default |
+|---|---|---|---|
+| `DATABASE_URL` | API, Alembic | SQLAlchemy PostgreSQL URL | required for V2 |
+| `DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`, `DATABASE_ECHO` | API | Pool tuning / SQL echo | `5`, `10`, `false` |
+| `RETRIEVAL_AUTH_TOKENS_JSON` | API | Dev token → tenants (list) or `{"tenants":[],"roles":[]}` | `{}` (deny all) |
+| `GENERATION_TENANT_POLICY_JSON` | API | Tenant → `{provider:"gemini",purpose,retention}` | `{}` (generation off) |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | API, Streamlit | Provider key/model | unset, `gemini-3.1-flash-lite` |
+| `API_BASE_URL` | Streamlit | V2 API base URL; unset = Standalone mode | unset |
+| `API_TENANT_ID`, `API_BEARER_TOKEN` | Streamlit | Server-side V2 credentials (never shown in UI) | unset |
+| `STREAMLIT_GEMINI_API_KEY` | Compose | Maps to the Streamlit container's `GEMINI_API_KEY` for ranking enrichment | unset |
+| `POSTGRES_*`, `API_PORT`, `STREAMLIT_PORT` | Compose | Database settings and published ports | `.env.example` |
+| `LANGGRAPH_STRICT_MSGPACK` | API | Restrict checkpoint deserialization | `true` |
+| `TEST_DATABASE_URL` | tests | Isolated pgvector DB for integration tests | unset (skipped) |
+| `GENAI_INPUT/OUTPUT_USD_PER_MILLION_TOKENS` | traces | Optional cost-estimate rates | unset |
 
-`data/synthetic_retrieval.json` is a small labelled regression dataset. Run the
-preserved whole-document cosine baseline with
-`python -m evals.run_whole_document_baseline`. Run the real PostgreSQL native
-full-text + pgvector + RRF evaluator only after starting the database with
-`python -m evals.run_postgres_retrieval_eval`. The latter intentionally calls
-the production pipeline rather than claiming PostgreSQL is BM25. Current
-executed results and limitations are in [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md).
+`API_BEARER_TOKEN`/`API_TENANT_ID` can also be set in `.streamlit/secrets.toml`.
+The token-map adapter is **local development authorization, not production
+authentication**; production must use an identity provider's principal/tenant claims.
 
-## Offline quality gates and observability
-
-The repository has no live-provider benchmark in CI. Instead, it executes two
-small deterministic offline checks: the original whole-document cosine matcher
-against `data/synthetic_retrieval.json`, and local citation verification against
-`data/generation_eval.json`. Run them, then enforce the checked-in regression
-thresholds, with:
+## Testing and evaluation
 
 ```bash
+python -m pip install -r requirements-dev.txt
+python -m ruff check .
+python -m pytest -q                                   # unit, API contract, client, UI tests
+# Real PostgreSQL/pgvector (isolated database only — tables are truncated):
+export TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/resume_intelligence_test
+DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
+DATABASE_URL="$TEST_DATABASE_URL" alembic check
+pytest -m integration -q
+# Offline evaluations and regression gate (no live model calls):
 python -m evals.run_whole_document_baseline
 python -m evals.run_generation_eval
 python -m evals.run_offline_quality_eval
 python -m evals.quality_gate
+# Against a running stack (synthetic data; refuses live generation unless explicitly enabled):
+SMOKE_API_URL=http://localhost:8000 SMOKE_TENANT_ID=demo-tenant SMOKE_BEARER_TOKEN=<token> python scripts/smoke_api.py
+API_BASE_URL=http://localhost:8000 API_TENANT_ID=demo-tenant API_BEARER_TOKEN=<token> python scripts/smoke_streamlit.py
 ```
 
-`observability/tracing.py` emits structured generation records containing the
-operation, prompt version, model name, latency, character counts, outcome, and
-an optional cost estimate. It intentionally does not emit prompts, resumes, or
-provider responses. Direct identifiers and common secret-bearing values are
-redacted before a trace value can be logged. Cost stays `null` unless the active
-provider's rates are explicitly configured; character-to-token conversion is an
-estimate, not billing data. GitHub Actions runs linting, unit tests, these
-offline evaluations, and their regression gate. It does not run a live Gemini
-call or shared database integration test.
+Test layers: `tests/test_context_citations.py` (citation/ID/budget regressions),
+`tests/test_api_contracts.py` (routes, auth, roles, policy, safe errors,
+workflows), `tests/test_api_client.py` (timeouts, retries, error mapping, live
+client↔FastAPI contract), `tests/test_frontend.py` (every page, connected flows,
+citations, empty/error states, blind review), `tests/test_ranking_regression.py`
+(score parity), `tests/integration/` (PostgreSQL persistence, workflow restart and
+crash reconciliation). No test calls a live LLM; CI never does either.
 
-Generate the same supply-chain checks used by CI with:
+Measured results — including what was **not** verified — are in
+[EVALUATION_RESULTS.md](EVALUATION_RESULTS.md).
 
-```bash
-python -m pip_audit --cache-dir /tmp/pip-audit --local
-cyclonedx-py requirements requirements.txt --output-file sbom.cdx.json
-```
+## Responsible-AI safeguards
 
-For a disposable PostgreSQL evaluation database, set both `TEST_DATABASE_URL`
-and `DATABASE_URL` to that isolated database, apply `alembic upgrade head`, run
-`pytest -m integration -q`, then run
-`python -m evals.run_postgres_retrieval_eval`. Never point these commands at a
-shared or production database.
-
-## Rollback procedure
-
-Before a controlled pilot, record the prior image digest and database revision.
-If an authorization, privacy, migration, or quality threshold regresses: stop
-new intake, route reviewers back to the unchanged standalone Streamlit path,
-redeploy the prior image digest, and restore the previous application revision.
-Do not downgrade or restore PostgreSQL until a tested backup exists and the
-migration's downgrade/data-loss behavior has been reviewed. Production rollout
-thresholds and rollback authority still require an identified human owner.
-
-## Optional Gemini enrichment
-
-The app works without Gemini and retains its deterministic scoring and rule-based
-summary behavior. To enable the four optional GenAI features, create a Gemini API
-key in [Google AI Studio](https://aistudio.google.com/apikey), copy
-`.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`, and replace the
-placeholder value. Alternatively, set the `GEMINI_API_KEY` environment variable.
-
-The default model is `gemini-3.1-flash-lite`. Override it with the `GEMINI_MODEL`
-environment variable if needed. Model availability, free-tier limits, and pricing
-can change; check Google's current Gemini API documentation before a demonstration.
-
-One Gemini request per candidate produces a contextual summary, personalized
-improvement suggestions, three interview questions, and an evidence explanation
-for every required skill. Results are cached in process using a hash of the
-anonymized input and job configuration, so Streamlit reruns do not repeat calls.
-Gemini never changes deterministic scores, ranks, experience values, or review
-priorities. If the key is missing, the API is unavailable, or its response is
-invalid, the existing rule-based summary and suggestions remain available.
-
-Only anonymized text is sent when blind-review mode is enabled. Inputs longer than
-30,000 resume characters or 12,000 job-description characters are bounded for the
-request by keeping the beginning and end. Free-tier data may be used by Google to
-improve its products. Use fictional or appropriately anonymized resumes for demos,
-and verify all generated content against the original source.
-
-## Testing
-
-The core suite uses Python's built-in test runner:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-For a development environment with pytest:
-
-```bash
-python -m pip install -r requirements-dev.txt
-pytest -q
-```
-
-To run the real PostgreSQL/pgvector integration suite after creating an isolated
-test database and applying migrations to it:
-
-```bash
-export TEST_DATABASE_URL='postgresql+psycopg://resume:replace-with-local-test-password@localhost:5432/resume_intelligence_test'
-DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
-pytest -m integration -q
-```
-
-## Structured parsing API
-
-`extract_text_from_bytes(filename, data)` remains the compatibility API for
-callers that need plain extracted text. New document-intelligence code should
-use `parse_document_from_bytes(filename, data)`, which returns a versioned
-`ParsedDocument` with section-aware chunks, exact offsets into normalized text,
-and provenance. PDF sections retain their actual page number; DOCX sections and
-chunks use `page_number=None` because the format parser does not provide stable
-pagination. Chunk size and overlap are configurable per call.
-
-## Privacy and security behavior
-
-- The standalone Streamlit path processes uploads in memory. The optional V2
-  API persists normalized document JSON, chunks, embeddings, source filename,
-  and provenance in PostgreSQL until an authorized deletion; original upload
-  bytes are not stored by the repository.
-- Valid Gemini enrichments are cached only in application memory. The V2 API's
-  database content must be treated as confidential candidate data.
-- Supported uploads are PDF and DOCX, limited to 10 MB.
-- PDF signatures, page counts, DOCX structure, and expanded DOCX size are checked.
-- Blind-review mode redacts common emails, phone numbers, URLs, and likely header names.
-- Blind-review progress, failures, result metadata, and audit exports substitute
-  opaque per-run candidate labels for source filenames.
-- Blind review cannot guarantee removal of every identity or demographic proxy.
-- A production deployment should add authentication, encrypted persistence only if
-  necessary, retention controls, malware scanning, privacy-safe audit events, and an
-  incident process.
+- Deterministic scores are computed only from the resume text and configured criteria; AI never alters scores, ranks, or review records.
+- Generated content is labelled as AI assistance requiring human review; workflow review approves or rejects the *notes*, never the applicant.
+- Every generated claim, requirement, and interview question must cite an exact excerpt of the redacted, budgeted evidence supplied to the model; otherwise the output is withheld.
+- Prompts mark documents as untrusted data and forbid ranking, hiring, rejection, and protected-characteristic inference.
+- Generation is explicit and user-initiated; there is no autonomous agent, tool calling, or second workflow engine.
 
 ## Known limitations
 
-- Scanned PDFs are detected but OCR is not bundled because reliable OCR requires an
-  additional system runtime or managed service.
-- Experience extraction intentionally uses explicit phrases such as “5 years of
-  experience”; it does not infer duration from employment dates.
-- The included skill taxonomy is deterministic and extensible, but not exhaustive.
-- Semantic embedding models can reproduce biases from their training data.
-- The app has not been validated for autonomous or high-stakes employment decisions.
-- Gemini output can be incomplete or incorrect and always requires human verification.
-- The CI/evaluation datasets are intentionally tiny and synthetic; passing their
-  gates is not a production-readiness, fairness, load, or security certification.
-- There is no background job queue; parsing, embedding, retrieval, and provider
-  calls execute synchronously in the request/UI process.
-- The token-map authorization adapter is local-development infrastructure, not
-  production identity, RBAC, purpose limitation, or audit access control.
+- Ranking results and ranking review records remain in-session (exported for audit); there is no persisted score-snapshot schema. Ranking stored library documents without re-upload is not implemented.
+- Identifier redaction is regex-based and is not guaranteed de-identification; names outside the header line, addresses, and demographic proxies may remain.
+- The token-map authorization adapter and role model are development infrastructure, not production identity/RBAC.
+- Requests are synchronous (parsing, embedding, generation, workflows run in the request); there is no background queue.
+- Generated briefs cannot be edited; reviewers approve or reject them with a note.
+- Live Gemini generation has not been validated in this repository; only fake-provider and offline verification were executed.
+- Scanned PDFs are detected but OCR is not bundled; experience extraction uses explicit phrases only.
+- Evaluation datasets are tiny and synthetic; they are regression harnesses, not evidence of relevance, fairness, or load capacity.
 
-## Readiness conclusion
+## Privacy and security behavior
 
-The repository is ready for a **portfolio demonstration using synthetic data**:
-the complete local suite, PostgreSQL integration tests, container smoke flow,
-offline quality gates, dependency audit, and SBOM command were executed
-successfully on 2026-10-14. See `EVALUATION_RESULTS.md` for the measurements.
+- Standalone ranking processes uploads in memory. V2 persists normalized text,
+  chunks, embeddings, and provenance in PostgreSQL until an authorized deletion;
+  original upload bytes and filenames are not stored (`document.pdf`/`document.docx` placeholder).
+- Supported uploads are PDF and DOCX up to 10 MB (enforced in Streamlit and API),
+  with signature, page-count, DOCX-expansion, and 500-chunk ingestion limits.
+- Workflow and review records store a hashed principal (`token-sha256:…`), never token material.
+- Error responses use fixed messages; validator and provider exception text is never returned.
+- Blind review cannot guarantee removal of every identity or demographic proxy.
 
-It is **not ready for a controlled pilot or production use**. Those stages need
-an approved identity/RBAC provider, durable opaque candidate identity, reviewed
-retention and deletion controls, malware/OCR isolation, dependency locking,
-representative relevance/fairness/load evaluation, live-provider validation,
-backup/restore drills, and owner-approved quality/rollback thresholds.
+## Rollback procedure
+
+Record the prior image digest and database revision before a controlled pilot.
+If an authorization, privacy, migration, or quality threshold regresses: stop new
+intake, unset `API_BASE_URL` to route reviewers to Standalone ranking, redeploy the
+prior image digest, and restore the previous application revision. Revision
+`0003_workflow_runs` only adds a table; review its downgrade before running it,
+and never downgrade or restore PostgreSQL without a tested backup.
+
+## Optional Gemini enrichment in Candidate Ranking
+
+The ranking page's original enrichment uses `GEMINI_API_KEY` in the **Streamlit**
+process (or `.streamlit/secrets.toml`). One request per candidate produces a
+summary, suggestions, three interview questions, and requirement evidence; it is
+cached in memory and never changes scores. Without a key, rule-based summaries are
+shown. Only anonymized text is sent when blind review is on. Free-tier data may be
+used by Google to improve its products — use fictional resumes for demos.
 
 ## Project structure
 
 ```text
-app.py                       Streamlit workflow and presentation
-utils/matcher.py             Lazy model loading and semantic similarity
-utils/scoring.py             Weighted, explainable scoring
-utils/skills_extractor.py    Skill aliases, matching, and string/provenance evidence
-utils/pdf_parser.py          Secure PDF/DOCX validation, parsing, chunks, provenance
-domain/schemas.py            Versioned Pydantic document/chunk/evidence contracts
-utils/privacy.py             Blind-review redaction
-utils/candidate_analyzer.py  Experience and review-quality heuristics
-utils/genai_analyzer.py      Optional Gemini prompting, validation, and memory cache
-tests/                       Core and application smoke tests
+app.py                       Streamlit entrypoint: mode detection, navigation
+frontend/api_client.py       Typed V2 HTTP client (timeouts, safe retries, safe errors)
+frontend/context.py          Standalone/Connected mode, session-scoped caches
+frontend/components.py       Citation, brief, answer, status rendering
+frontend/views/*.py          Overview, Library, Ranking, Search, Ask AI, Briefs, History
+services/ranking.py          Deterministic analysis/exports (no Streamlit)
+api/main.py, api/workflows.py FastAPI routes; api/schemas.py shared contracts
+api/auth.py, api/policy.py   Dev token authorization + roles; generation policy gate
+retrieval/                   Contracts, budgeted context, RRF, reranker, pipeline
+generation/                  Prompts, schemas, citation verification, service
+workflows/                   LangGraph recruiter-brief workflow, checkpointers
+repositories/, db/, migrations/  PostgreSQL persistence and Alembic revisions
+utils/                       Parsing, matching, skills, scoring, privacy, enrichment
+evals/, data/                Offline evaluation harness and synthetic datasets
+scripts/                     API and Streamlit smoke tests
 ```

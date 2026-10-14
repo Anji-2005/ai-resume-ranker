@@ -52,6 +52,10 @@ jobs:
         with:
           name: python-sbom
           path: sbom.cdx.json
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+        env:
+          POSTGRES_PASSWORD: ci-compose-config-only
       - run: docker build --tag ai-resume-ranker:ci .
       - run: >-
           docker run --rm ai-resume-ranker:ci python -c

@@ -7,3 +7,12 @@ font = "sans-serif"
 
 [server]
 maxUploadSize = 10
+headless = true
+
+[browser]
+# No usage telemetry leaves the deployment.
+gatherUsageStats = false
+
+[client]
+# Show only the exception type for uncaught errors; never messages or tracebacks.
+showErrorDetails = "type"
