@@ -15,5 +15,6 @@ RUN python -m pip install --no-cache-dir \
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --requirement requirements.txt
 COPY . .
-EXPOSE 8000
+# 8000: FastAPI (default command); 8501: Streamlit (compose `streamlit` service).
+EXPOSE 8000 8501
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

@@ -108,3 +108,28 @@ class WorkflowReview(Base):
     reviewer_note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkflowRun(Base):
+    """Tenant-scoped index of recruiter-brief workflow threads.
+
+    The LangGraph checkpoint thread_id equals ``workflow_id``; checkpoints are read
+    only after this tenant-filtered row is found, so other tenants cannot reach them.
+    """
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "workflow_id", name="uq_workflow_runs_tenant_workflow"),
+        UniqueConstraint("workflow_id", name="uq_workflow_runs_workflow_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    workflow_id: Mapped[str] = mapped_column(String(128))
+    created_by: Mapped[str] = mapped_column(String(256))
+    document_ids: Mapped[list] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(32))
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

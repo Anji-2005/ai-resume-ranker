@@ -1,5 +1,12 @@
+# Development-only overlay: bind-mounts source and enables reload. Never use for demos with real data.
 services:
   api:
     command: sh -c "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log"
     volumes:
       - .:/app
+      - model_cache:/models
+  streamlit:
+    command: streamlit run app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true --server.runOnSave=true
+    volumes:
+      - .:/app
+      - model_cache:/models

@@ -11,3 +11,6 @@ __pycache__
 candidate_review*.csv
 candidate_review*.xlsx
 candidate_review*.json
+sbom.cdx.json
+.ruff_cache
+.DS_Store

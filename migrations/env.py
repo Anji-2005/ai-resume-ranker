@@ -14,9 +14,20 @@ if config.config_file_name:
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 
+# LangGraph's PostgresSaver owns and migrates these tables itself (``saver.setup()``).
+# Alembic must never autogenerate operations for them, or it would propose dropping
+# durable workflow checkpoints.
+LANGGRAPH_TABLES = frozenset({"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"})
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    table_name = name if type_ == "table" else getattr(getattr(obj, "table", None), "name", None)
+    return table_name not in LANGGRAPH_TABLES
+
 
 def run_migrations_offline():
-    context.configure(url=config.get_main_option("sqlalchemy.url"), target_metadata=target_metadata, literal_binds=True)
+    context.configure(url=config.get_main_option("sqlalchemy.url"), target_metadata=target_metadata,
+                      literal_binds=True, include_object=include_object)
     with context.begin_transaction():
         context.run_migrations()
 
@@ -24,7 +35,7 @@ def run_migrations_offline():
 def run_migrations_online():
     connectable = engine_from_config(config.get_section(config.config_ini_section), prefix="sqlalchemy.", poolclass=pool.NullPool)
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(connection=connection, target_metadata=target_metadata, include_object=include_object)
         with context.begin_transaction():
             context.run_migrations()
 

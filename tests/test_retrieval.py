@@ -64,7 +64,8 @@ def test_pipeline_fuses_sources_preserves_chunk_ids_and_filters():
 
     assert repository.filters == filters
     assert set(result.source_chunk_ids) == {str(item.chunk_id) for item in result.candidates}
-    assert "source_chunk_id=chunk-dense" in result.context_text
+    assert all(f"[source_chunk_id={item.chunk_id}]" in result.context_text for item in result.candidates)
+    assert "chunk-dense" not in result.context_text
     by_key = {item.chunk_key: item for item in result.candidates}
     assert by_key["chunk-dense"].dense_rank == 1
     assert by_key["chunk-lexical"].lexical_rank == 1

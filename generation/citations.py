@@ -1,4 +1,4 @@
-"""Deterministic verification of model citations against retrieved source chunks."""
+"""Deterministic verification of model citations against the evidence actually supplied."""
 
 from generation.schemas import GroundedAnswer, GroundedClaim, RecruiterBrief, RequirementAnalysis
 
@@ -7,8 +7,17 @@ class CitationVerificationError(ValueError):
     pass
 
 
+def supplied_sources(context) -> dict[str, str]:
+    """Map canonical source IDs to the exact excerpt text that was sent to the model.
+
+    Only ``context.sources`` counts as supplied evidence. Full candidate content,
+    truncated tails, and chunks excluded by the budget are never accepted.
+    """
+    return context.supplied_text_by_id()
+
+
 def verify_recruiter_brief(brief: RecruiterBrief, context) -> RecruiterBrief:
-    sources = {str(candidate.chunk_id): candidate.content for candidate in context.candidates}
+    sources = supplied_sources(context)
     claims = [_verified_claim(claim, sources) for claim in brief.claims]
     questions = []
     for question in brief.interview_questions:
@@ -19,7 +28,7 @@ def verify_recruiter_brief(brief: RecruiterBrief, context) -> RecruiterBrief:
 
 
 def verify_answer(answer: GroundedAnswer, context) -> GroundedAnswer:
-    sources = {str(candidate.chunk_id): candidate.content for candidate in context.candidates}
+    sources = supplied_sources(context)
     if not answer.claims:
         if not answer.uncertainty:
             raise CitationVerificationError("an answer without claims must explicitly state uncertainty")
@@ -50,6 +59,8 @@ def _verify_citations(citations, sources):
     for citation in citations:
         source = sources.get(citation.source_chunk_id)
         if source is None:
-            raise CitationVerificationError("citation references a chunk outside authorized retrieval")
+            raise CitationVerificationError("citation references a source that was not supplied to the model")
+        if not citation.quote.strip():
+            raise CitationVerificationError("citation quote must contain text")
         if citation.quote not in source:
-            raise CitationVerificationError("citation quote is not an exact source excerpt")
+            raise CitationVerificationError("citation quote is not an exact excerpt of the supplied source")
