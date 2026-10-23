@@ -19,7 +19,7 @@ from frontend.api_client import ApiClient, config_from_env  # noqa: E402
 
 APP_PATH = str(Path(__file__).resolve().parents[1] / "app.py")
 PAGES = ["Overview", "Resume Library", "Candidate Ranking", "AI Candidate Search", "Ask AI",
-         "Recruiter Briefs", "Review History"]
+         "Recruiter Briefs", "AI Investigations", "Review History"]
 
 
 def synthetic_docx():

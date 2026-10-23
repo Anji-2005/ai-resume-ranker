@@ -2,14 +2,14 @@
 
 Standalone mode runs the original in-memory deterministic ranking. V2 Connected
 mode (``API_BASE_URL`` set) adds persistent documents, hybrid search, grounded
-Q&A, and durable recruiter-brief review through the FastAPI service.
+Q&A, durable recruiter-brief review, and bounded AI investigations through FastAPI.
 """
 
 import streamlit as st
 
 from frontend.components import inject_css, mode_badge
 from frontend.context import invalidate_documents, resolve_context
-from frontend.views import ask, briefs, history, library, overview, ranking, search
+from frontend.views import ask, briefs, history, investigations, library, overview, ranking, search
 from services.ranking import analyze_resume_bytes, build_export_frame, excel_bytes  # noqa: F401  (compat exports)
 from utils.matcher import MODEL_NAME
 
@@ -24,6 +24,7 @@ PAGES = {
     "AI Candidate Search": "🔎",
     "Ask AI": "💬",
     "Recruiter Briefs": "📝",
+    "AI Investigations": "🧭",
     "Review History": "🗂️",
 }
 
@@ -56,6 +57,8 @@ elif page == "Ask AI":
     ask.render(ctx)
 elif page == "Recruiter Briefs":
     briefs.render(ctx)
+elif page == "AI Investigations":
+    investigations.render(ctx)
 elif page == "Review History":
     history.render(ctx)
 

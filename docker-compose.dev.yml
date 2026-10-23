@@ -10,3 +10,7 @@ services:
     volumes:
       - .:/app
       - model_cache:/models
+  worker:
+    volumes:
+      - .:/app
+      - model_cache:/models

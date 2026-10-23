@@ -19,6 +19,8 @@ from api.policy import (
 )
 from db.session import get_session_factory
 from repositories.documents import DocumentRepository
+from repositories.investigations import InvestigationRepository
+from repositories.ingestion_jobs import IngestionJobRepository
 from repositories.workflow_reviews import WorkflowReviewRepository
 from repositories.workflow_runs import WorkflowRunRepository
 from retrieval.authorization import AuthorizationContext, RetrievalAuthorizationError
@@ -106,6 +108,14 @@ def get_run_repository(session=Depends(get_session)) -> WorkflowRunRepository:
     return WorkflowRunRepository(session)
 
 
+def get_investigation_repository(session=Depends(get_session)) -> InvestigationRepository:
+    return InvestigationRepository(session)
+
+
+def get_ingestion_job_repository(session=Depends(get_session)) -> IngestionJobRepository:
+    return IngestionJobRepository(session)
+
+
 def get_generation_status(tenant_id: Annotated[str, Depends(get_tenant_id)]) -> str:
     return generation_status(tenant_id)
 
@@ -128,6 +138,16 @@ def get_generation_provider():
     from generation.providers import LangChainGeminiProvider
 
     return LangChainGeminiProvider(gemini_api_key(), gemini_model_name())
+
+
+def get_investigation_provider():
+    from investigations.provider import LangChainGeminiToolProvider
+    from investigations.schemas import AgentLimits
+
+    limits = AgentLimits()
+    return LangChainGeminiToolProvider(
+        gemini_api_key(), gemini_model_name(), max_output_tokens=limits.max_output_tokens_per_plan,
+    )
 
 
 def get_checkpointer():

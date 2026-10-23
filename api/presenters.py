@@ -57,6 +57,7 @@ def version_info(row) -> schemas.DocumentVersionInfo:
     return schemas.DocumentVersionInfo(
         version_id=row.version_id, version_number=row.version_number, is_current=row.is_current,
         media_type=row.media_type, parser_name=row.parser_name, parser_version=row.parser_version,
+        embedding_model=row.embedding_model, embedding_model_version=row.embedding_model_version,
         content_sha256_prefix=row.content_hash[:12], chunk_count=row.chunk_count, created_at=row.created_at,
     )
 

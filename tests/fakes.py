@@ -10,6 +10,7 @@ from uuid import uuid4
 from docx import Document
 
 from repositories.documents import DocumentSummaryRow, DocumentTooLargeError, IngestionResult, VersionRow
+from investigations.schemas import ToolInvocation, ToolModelResponse
 from retrieval.contracts import RetrievalCandidate
 from utils.pdf_parser import parse_document_from_bytes
 
@@ -25,6 +26,7 @@ def synthetic_docx(*paragraphs):
 
 class FakeEmbedder:
     model_name = "fake-embedder-v1"
+    model_version = "1.0-test"
 
     def __init__(self):
         self.calls = 0
@@ -36,6 +38,9 @@ class FakeEmbedder:
 
 class FakeSession:
     def flush(self):
+        pass
+
+    def rollback(self):
         pass
 
 
@@ -70,6 +75,8 @@ class InMemoryDocumentRepository:
         version = SimpleNamespace(
             id=uuid4(), version_number=len(document.versions) + 1, content_hash=digest, is_current=True,
             media_type=parsed.media_type, parser_name=parsed.parser_name, parser_version=parsed.parser_version,
+            embedding_model=self.embedder.model_name,
+            embedding_model_version=self.embedder.model_version,
             created_at=datetime.now(timezone.utc), chunks=[],
         )
         for chunk in parsed.chunks:
@@ -101,8 +108,12 @@ class InMemoryDocumentRepository:
         document = self.get_document(tenant_id, document_id)
         if document is None:
             return []
-        return [VersionRow(v.id, v.version_number, v.is_current, v.media_type, v.parser_name, v.parser_version,
-                           v.content_hash, len(v.chunks), v.created_at) for v in reversed(document.versions)]
+        return [VersionRow(
+            version_id=v.id, version_number=v.version_number, is_current=v.is_current,
+            media_type=v.media_type, parser_name=v.parser_name, parser_version=v.parser_version,
+            embedding_model=v.embedding_model, embedding_model_version=v.embedding_model_version,
+            content_hash=v.content_hash, chunk_count=len(v.chunks), created_at=v.created_at,
+        ) for v in reversed(document.versions)]
 
     def get_version_chunks(self, tenant_id, document_id, version_number, limit=500):
         document = self.get_document(tenant_id, document_id)
@@ -171,6 +182,59 @@ class InMemoryRunRepository:
         return run
 
 
+class InMemoryIngestionJobRepository:
+    def __init__(self):
+        self.jobs = {}
+        self.session = FakeSession()
+
+    def enqueue(self, **values):
+        existing = self.get_by_key(values["tenant_id"], values["idempotency_key"])
+        if existing:
+            from repositories.ingestion_jobs import JobIdempotencyConflict
+            if existing.request_hash != values["request_hash"]:
+                raise JobIdempotencyConflict("conflict")
+            return existing, False
+        now = datetime.now(timezone.utc)
+        fields = {
+            "id": uuid4(), "status": "queued", "attempt_count": 0,
+            "available_at": now, "queued_at": now, "started_at": None, "completed_at": None,
+            "lease_expires_at": None, "worker_id": None, "error_code": None,
+            "processing_latency_ms": None, "result_document_id": None, "result_version_id": None,
+            "result_version_number": None, "result_created": None, "target_document_id": None,
+            "target_version_number": None,
+        }
+        fields.update(values)
+        job = SimpleNamespace(**fields)
+        self.jobs[job.id] = job
+        return job, True
+
+    def get_by_key(self, tenant_id, key):
+        return next((job for job in self.jobs.values()
+                     if job.tenant_id == tenant_id and job.idempotency_key == key), None)
+
+    def get_for_tenant(self, tenant_id, job_id):
+        job = self.jobs.get(job_id)
+        return job if job and job.tenant_id == tenant_id else None
+
+    def list_for_tenant(self, tenant_id, *, status=None, limit=100):
+        rows = [job for job in self.jobs.values()
+                if job.tenant_id == tenant_id and (not status or job.status == status)]
+        return list(reversed(rows[-limit:]))
+
+    def metrics(self, tenant_id, *, now=None):
+        rows = self.list_for_tenant(tenant_id, limit=200)
+        return {
+            "counts": {state: sum(job.status == state for job in rows)
+                       for state in ("queued", "processing", "completed", "failed")},
+            "completed_last_hour": sum(job.status == "completed" for job in rows),
+            "failed_last_hour": sum(job.status == "failed" for job in rows),
+            "throughput_per_minute_last_hour": sum(job.status == "completed" for job in rows) / 60,
+            "mean_processing_latency_ms": None,
+            "p95_processing_latency_ms": None,
+            "oldest_queued_age_seconds": None,
+        }
+
+
 class InMemoryReviewRepository:
     def __init__(self):
         self.records = {}
@@ -222,3 +286,136 @@ class CitingProvider:
             "interview_questions": [{"question": "Describe the project.", "reason": "Verify the evidence.",
                                      "citations": [citation]}],
         }
+
+
+class InvestigationToolProvider:
+    """Adaptive fake tool-calling model for API/UI tests; no network or hidden fixed workflow."""
+
+    model_name = "fake-investigation-tool-model-v1"
+
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.prompts = []
+
+    def invoke_tools(self, prompt, tools):
+        self.prompts.append(prompt)
+        if self.fail:
+            raise RuntimeError("provider failure containing confidential text")
+        payload = json.loads(prompt.split("UNTRUSTED_INVESTIGATION_DATA_JSON:\n", 1)[1])
+        results = payload["tool_results"]
+        if not results:
+            invocation = ToolInvocation(
+                id="search-1", name="search_evidence",
+                arguments={"query": payload["objective"], "limit": 5},
+            )
+        elif payload["explicit_job_requirements"] and not any(
+                item["tool_name"] == "check_requirements" for item in results):
+            invocation = ToolInvocation(
+                id="requirements-1", name="check_requirements",
+                arguments={"requirements": payload["explicit_job_requirements"]},
+            )
+        else:
+            search = next((item for item in results if item["tool_name"] == "search_evidence"), None)
+            sources = search["output"].get("sources", []) if search else []
+            evidence_action = search["action_id"] if search else "search-1"
+            supported = []
+            gaps = []
+            questions = []
+            citation = None
+            if sources:
+                excerpt = sources[0]["excerpt"]
+                quote = excerpt.strip()[:min(40, len(excerpt.strip()))]
+                citation = {"source_chunk_id": sources[0]["source_chunk_id"], "quote": quote}
+                supported = [{"text": "The authorized document contains relevant technical evidence.",
+                              "citations": [citation]}]
+                questions = [{"question": "Can the reviewer verify the depth of this experience?",
+                              "rationale": "The cited excerpt is concise.", "citations": [citation]}]
+            else:
+                gaps = [{"topic": "Requested evidence", "explanation": "No evidence was found.",
+                         "checked_action_ids": [evidence_action]}]
+            matrix = []
+            for requirement in payload["explicit_job_requirements"]:
+                if citation and requirement.casefold() in sources[0]["excerpt"].casefold():
+                    matrix.append({"requirement": requirement, "status": "supported",
+                                   "explanation": "The requirement is stated in the cited excerpt.",
+                                   "citations": [citation], "checked_action_ids": []})
+                else:
+                    matrix.append({"requirement": requirement, "status": "insufficient",
+                                   "explanation": "Insufficient evidence was found for this requirement.",
+                                   "citations": [], "checked_action_ids": [evidence_action]})
+            invocation = ToolInvocation(id="draft-1", name="draft_investigation", arguments={"report": {
+                "supported_findings": supported,
+                "missing_evidence": gaps,
+                "contradictory_evidence": [],
+                "requirement_evidence": matrix,
+                "verification_questions": questions,
+            }})
+        return ToolModelResponse(
+            calls=[invocation], input_tokens=100, output_tokens=50, cost_usd=0.001,
+        )
+
+
+class InMemoryInvestigationRepository:
+    def __init__(self):
+        self.runs = {}
+        self.events = {}
+        self.reviews = {}
+        self.session = FakeSession()
+
+    def create(self, **values):
+        now = datetime.now(timezone.utc)
+        run = SimpleNamespace(**values, created_at=now, updated_at=now)
+        self.runs[run.id] = run
+        return run
+
+    def commit_started(self, run):
+        return None
+
+    def get_for_tenant(self, tenant_id, investigation_id, *, for_update=False):
+        run = self.runs.get(investigation_id)
+        return run if run is not None and run.tenant_id == tenant_id else None
+
+    def get_by_idempotency_key(self, tenant_id, key):
+        return next((run for run in self.runs.values()
+                     if run.tenant_id == tenant_id and run.idempotency_key == key), None)
+
+    def list_for_tenant(self, tenant_id, *, status=None, limit=100):
+        rows = [run for run in self.runs.values()
+                if run.tenant_id == tenant_id and (not status or run.status == status)]
+        return sorted(rows, key=lambda row: row.updated_at, reverse=True)[:limit]
+
+    def update_status(self, run, *, status, error_code=None, outcome=None):
+        run.status, run.error_code, run.outcome = status, error_code, outcome
+        run.updated_at = datetime.now(timezone.utc)
+        return run
+
+    def sync_state(self, run, values, *, status, error_code=None, outcome=None):
+        self.update_status(run, status=status, error_code=error_code, outcome=outcome)
+        run.document_scope = values.get("scope_documents", run.document_scope)
+        run.report = values.get("report") or None
+        run.sources = values.get("evidence", [])
+        run.elapsed_seconds = float(values.get("execution_seconds", run.elapsed_seconds))
+        records = self.events.setdefault(run.id, [])
+        for sequence, item in enumerate(values.get("execution_events", []), start=1):
+            if sequence <= len(records):
+                continue
+            records.append(SimpleNamespace(sequence=sequence, **item))
+        return run
+
+    def list_events(self, tenant_id, investigation_id):
+        run = self.get_for_tenant(tenant_id, investigation_id)
+        return list(self.events.get(investigation_id, [])) if run else []
+
+    def add_review(self, run, *, subject, approved, comment):
+        key = (run.tenant_id, run.id)
+        if key in self.reviews:
+            return self.reviews[key], False
+        record = SimpleNamespace(
+            subject=subject, approved=approved, comment=comment,
+            reviewed_at=datetime.now(timezone.utc),
+        )
+        self.reviews[key] = record
+        return record, True
+
+    def get_review(self, tenant_id, investigation_id):
+        return self.reviews.get((tenant_id, investigation_id))

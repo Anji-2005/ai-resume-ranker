@@ -27,6 +27,8 @@ from api.dependencies import (
 )
 from api.policy import GENERATION_ENABLED, gemini_api_key, gemini_model_name
 from api.workflows import router as workflow_router
+from api.investigations import router as investigation_router
+from api.ingestion import router as ingestion_router
 from generation.citations import CitationVerificationError
 from generation.service import (
     GenerationOutputError,
@@ -52,6 +54,8 @@ MAX_INGEST_CHUNKS = 500
 
 app = FastAPI(title="Recruitment Document Intelligence API", version=schemas.API_CONTRACT_VERSION)
 app.include_router(workflow_router)
+app.include_router(investigation_router)
+app.include_router(ingestion_router)
 
 Reader = Annotated[AuthorizationContext, Depends(authorized(ROLE_READER))]
 Editor = Annotated[AuthorizationContext, Depends(authorized(ROLE_EDITOR))]

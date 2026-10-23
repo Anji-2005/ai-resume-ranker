@@ -19,8 +19,12 @@ approved migration explicitly replaces an interface.
   identity-bearing metadata in UI, exports, errors, logs, or cache keys.
 - Deterministic scores and human decisions are immutable audit facts. LLMs may
   produce review assistance only; they cannot alter scores, ranks, or outcomes.
-- Keep one orchestration workflow. Do not introduce autonomous or multiple
-  agents.
+- Preserve the existing bounded recruiter-brief workflow. V3 may add exactly
+  one bounded InvestigationWorkflow using a fixed registry of tenant-scoped,
+  read-only evidence tools. It may not create sub-agents, dynamically register
+  tools, perform candidate ranking, make employment decisions, or mutate
+  candidate documents. All generated notes require verified citations and
+  human review.
 - Keep parsing, retrieval, scoring, generation, persistence, and HTTP/UI
   adapters separately testable. Business logic must not import Streamlit,
   FastAPI, or database session objects.

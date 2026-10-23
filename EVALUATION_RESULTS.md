@@ -1,7 +1,7 @@
 # Evaluation results
 
-Sections are dated and kept in the order they were produced. The **Streamlit
-integration** section at the end is the current run; earlier sections are
+Sections are dated and kept in the order they were produced. The **V3 AI
+Investigation validation** section at the end is the current run; earlier sections are
 preserved as historical evidence and were not re-labelled as rerun. The
 machine-readable `evals/latest_*.json` artifacts now contain the most recent run.
 
@@ -164,3 +164,153 @@ test-only credentials) so no existing local stack was touched:
 - Live Gemini generation was not invoked, so provider availability, quality,
   latency, and billed cost remain unverified. Generation validation results are
   mock/deterministic checks only.
+
+## V3 AI Investigation validation — 2026-10-15
+
+This section is the current release-readiness run. It used only fictional data,
+the disposable `resume_intelligence_test` database, and deterministic fake
+providers. No Gemini request or real candidate record was used.
+
+### Executed checks
+
+| Check | Actual result |
+|---|---|
+| Complete `pytest -q` with `TEST_DATABASE_URL` | **169 passed**, 84 warnings, 7.46 s |
+| PostgreSQL-only `pytest -m integration -q` | **9 passed**, 160 deselected, 5 warnings, 2.03 s |
+| Focused agent/API/eval regression tests after recovery fix | **48 passed**, 5 warnings, 2.27 s |
+| Ruff / Alembic drift / `git diff --check` | passed / no new operations / clean |
+| Dependency audit | `pip-audit --local`: no known vulnerabilities |
+| SBOM | CycloneDX generated successfully in `/tmp`; 18 range-based requirements were reported without pinned versions |
+| Compose build and health | cached CPU dependency layers; PostgreSQL, API, and Streamlit healthy |
+| Container runtime | pgvector **0.8.7**; migration **0004_investigations**; `torch 2.14.1+cpu`, CUDA `False`, `torch.version.cuda=None` |
+| API image size | **573,879,333 bytes** |
+| Synthetic API smoke | health, auth/tenant denial, ingestion/idempotency, redacted detail, hybrid retrieval, Q&A/workflow/investigation fail-closed generation gate, both histories, deletion passed |
+| Connected Streamlit smoke | all **8 pages** rendered, live hybrid search rendered a synthetic record, cleanup passed |
+
+The 84 full-suite warnings are not failures: 78 are Starlette TestClient timeout
+deprecations and the remainder are PyMuPDF/Google dependency deprecations. They
+remain maintenance work for future dependency updates.
+
+### Investigation-agent benchmark
+
+Command: `python -m evals.run_investigation_eval`. Dataset:
+`data/investigation_eval_v1.json` (`investigation-agent-v1`). The evaluator runs
+the production LangGraph and validation code with an in-memory repository,
+labelled synthetic chunks, and a scripted fake tool-calling provider.
+
+| Metric | Measured result |
+|---|---:|
+| Scenarios | 12 |
+| Task completion | 1.0000 (7/7 task scenarios reached human review) |
+| Expected scenario outcome | 1.0000 (12/12) |
+| Tool-selection correctness | 1.0000 (10/10 scorable expected sequences) |
+| Exact citation validity | 1.0000 (11/11 citations) |
+| Unsupported-claim rejection | 1.0000 (1/1 hallucinated quote withheld) |
+| Authorization violations | 0 (1/1 unauthorized attempt blocked) |
+| Tool calls per investigation | mean 1.75; min 0; max 3 |
+| Local orchestration latency | mean 1.892 ms; P95 3.562 ms |
+| Mock-reported accounting cost | USD 0.022 total (not billed cost) |
+| Live provider calls / cost | 0 / unavailable |
+
+The cases include straightforward and implicit evidence, missing and
+contradictory evidence, a two-search adaptive follow-up, multi-document scope,
+prompt injection text, an unauthorized document, planning-budget exhaustion,
+an invented quote, invalid arguments, and an unavailable tool. The quality gate
+requires all correctness/blocking rates above to remain 1.0 and authorization
+violations to remain zero.
+
+Other evaluations rerun in the same validation sequence:
+
+| Evaluation | Actual result |
+|---|---|
+| Whole-document MiniLM baseline | Recall@5 1.0000; MRR 0.9000; nDCG@5 0.9262; mean 82.547 ms; P95 294.993 ms |
+| PostgreSQL pgvector + native FTS + RRF | Recall@5 1.0000; MRR 0.9000; nDCG@5 0.9262; mean 26.301 ms; P95 46.630 ms |
+| Citation verification (7 cases) | accuracy 1.0000; mean 0.002 ms; provider cost unavailable |
+| Offline parser/redaction/score/schema suite | all correctness metrics 1.0000; sensitive acceptance 0.0000; 31.185 ms; zero live calls |
+| Combined synthetic quality gate | passed |
+
+Post-smoke container logs contained startup/model-loading metadata only: no
+bearer token, synthetic email, upload filename, document passage, or query was
+present. Access logging is disabled. This observation is a bounded log review,
+not a penetration test or proof that every future dependency log is safe.
+
+### Release readiness
+
+- **Portfolio demonstration:** ready with fictional documents and the documented
+  fail-closed configuration. The complete local suite, migrations, evaluations,
+  container build, HTTP smoke, and eight-page Streamlit smoke passed.
+- **Controlled pilot:** blocked pending an approved identity provider/RBAC,
+  a retention and purge policy for historical reports/checkpoints, live-provider
+  evaluation on approved non-sensitive cases, and recovery/operations procedures
+  for runs interrupted during synchronous planning.
+- **Production:** not ready. In addition to pilot blockers, it needs locked and
+  reviewed dependencies/model artifacts, load/concurrency and disaster-recovery
+  tests, broader parser/redaction/fairness evaluation, malware/OCR isolation
+  decisions, monitoring/incident response, and a security assessment.
+
+Known measurement limits: the investigation provider is scripted; its labelled
+pipeline does not measure retrieval relevance; orchestration timings exclude
+PostgreSQL, network, provider, and load latency; mock costs only exercise budget
+accounting. Live Gemini tool choice, output quality, injection resistance,
+latency, availability, and billed cost remain **unverified**.
+
+## Background ingestion validation — 2026-10-17
+
+This run used six small fictional PDF/DOCX documents from
+`data/synthetic_ingestion_v1.json` and the disposable
+`resume_intelligence_test` PostgreSQL/pgvector database. No candidate data or
+live model API was used.
+
+| Check | Actual result |
+|---|---|
+| Complete suite with isolated PostgreSQL | **182 passed**, 101 warnings, 11.11 s |
+| PostgreSQL integration only | **15 passed**, 167 deselected, 5 warnings, 4.37 s |
+| Focused ingestion/API/client/UI tests | **68 passed**, 100 warnings, 8.95 s |
+| Ruff / Alembic drift / `git diff --check` | passed / no new operations / clean |
+| Compose rebuild | cached dependency layers; API, worker, and Streamlit images built |
+| Runtime stack | PostgreSQL/API/Streamlit healthy; worker running; migration `0005_background_ingestion`; pgvector 0.8.7 |
+| Container runtime | `torch 2.14.1+cpu`; CUDA false; `torch.version.cuda=None` |
+| API image size | **573,950,109 bytes** |
+| Synthetic API smoke | background enqueue/replay, durable status, tenant denial, real worker completion, metrics, retrieval, generation fail-closed, and deletion passed |
+| Connected Streamlit smoke | all **8 pages** rendered and live hybrid search returned a fictional document |
+| Bounded log scan | 24 API/worker/Streamlit lines; 0 matches for the test token, email, identity-bearing filename, or known document/query text |
+
+Integration coverage includes successful ingestion and payload purge,
+tenant-scoped job reads, idempotent replay, bounded exponential retry, expired
+lease recovery after simulated worker loss, terminal empty-document handling,
+atomic reindex metadata updates, and deletion-before-processing without document
+resurrection.
+
+### Ingestion benchmark
+
+Both modes execute the production PostgreSQL claim/worker/parser/persistence
+path. The deterministic mode substitutes only the embedding calculation and is
+the CI regression gate. The real mode loads the repository's local
+`all-MiniLM-L6-v2` SentenceTransformer.
+
+| Mode | Completed | Failed | Wall time | Throughput | Mean job latency | P50 | P95 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Deterministic 384-d fake | 6/6 | 0 | 0.1084 s | 55.3402 docs/s | 9.8825 ms | 8.9752 ms | 17.1248 ms |
+| Real MiniLM, cold process/model load included | 6/6 | 0 | 5.0531 s | 1.1874 docs/s | 830.7300 ms | 24.1255 ms | 4728.6330 ms |
+
+The real run's first model load dominates its P95. Six tiny documents processed
+serially on one workstation are not a load, concurrency, capacity, or SLA
+measurement. Model-cache state and local PostgreSQL performance materially
+affect these timings. The tracked embedding version is the
+`sentence-transformers` package version; an immutable upstream model artifact
+revision is not yet pinned.
+
+### Remaining validation limits
+
+- Worker crash recovery was simulated by expiring a lease in PostgreSQL; a
+  process kill during active parsing/embedding was not injected in Docker.
+- One worker was measured. Concurrent claim contention, horizontal scaling,
+  sustained load, backpressure, and database growth/retention were not tested.
+- Upload bytes live temporarily in PostgreSQL until completion or terminal
+  failure. There is no object store, malware scanner, OCR sandbox, or automated
+  retention purge for old job metadata.
+- Streamlit AppTest and the connected eight-page smoke validate the status UI's
+  element tree and API integration, not browser-level visual appearance or
+  automatic push updates; users refresh persisted status explicitly.
+- Legacy synchronous upload endpoints remain for compatibility. Generation and
+  investigation execution remain synchronous and were not changed by this work.

@@ -45,6 +45,8 @@ jobs:
       - run: python -m evals.run_whole_document_baseline
       - run: python -m evals.run_generation_eval
       - run: python -m evals.run_offline_quality_eval
+      - run: python -m evals.run_investigation_eval
+      - run: python -m evals.run_ingestion_benchmark --database-url "$TEST_DATABASE_URL"
       - run: python -m evals.quality_gate
       - run: python -m pip_audit --cache-dir /tmp/pip-audit --local
       - run: cyclonedx-py requirements requirements.txt --output-file sbom.cdx.json

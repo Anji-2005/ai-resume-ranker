@@ -1,0 +1,24 @@
+{
+  "dataset_version": "synthetic-ingestion-v1",
+  "benchmark_version": "postgres-worker-ingestion-v1",
+  "generated_at": "2026-10-16T19:04:13.809860+00:00",
+  "embedding_mode": "real MiniLM",
+  "documents": 6,
+  "processed_claims": 6,
+  "completed": 6,
+  "failed": 0,
+  "success_rate": 1.0,
+  "total_input_bytes": 112977,
+  "wall_seconds": 5.0530537921004,
+  "throughput_documents_per_second": 1.1874007772052597,
+  "throughput_bytes_per_second": 22358.16293438644,
+  "mean_processing_latency_ms": 830.7299514223511,
+  "p50_processing_latency_ms": 24.125542026013136,
+  "p95_processing_latency_ms": 4728.632958140224,
+  "live_model_calls": 0,
+  "limitations": [
+    "Single worker and six small synthetic documents; this is not a concurrency or load test.",
+    "MiniLM embedding runtime is included.",
+    "Local PostgreSQL and filesystem/cache conditions materially affect timings."
+  ]
+}

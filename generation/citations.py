@@ -36,6 +36,11 @@ def verify_answer(answer: GroundedAnswer, context) -> GroundedAnswer:
     return GroundedAnswer(claims=[_verified_claim(claim, sources) for claim in answer.claims], uncertainty=answer.uncertainty)
 
 
+def verify_citations(citations, context) -> None:
+    """Public verifier for other bounded, evidence-backed generation workflows."""
+    _verify_citations(citations, supplied_sources(context))
+
+
 def _verified_claim(claim: GroundedClaim, sources):
     _verify_citations(claim.citations, sources)
     return claim
