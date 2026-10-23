@@ -6,12 +6,14 @@ One Streamlit application (`app.py`) runs in two modes:
 
 - **Standalone mode** (`API_BASE_URL` unset): the original in-memory,
   deterministic Candidate Ranking workflow. Nothing is persisted.
-- **V2 Connected mode**: the same ranking, plus the Resume Library, AI Candidate
-  Search, Ask AI, Recruiter Briefs, and Review History pages, all backed by the
-  FastAPI service, PostgreSQL/pgvector, and one LangGraph workflow.
+- **V3 Connected mode**: the same ranking, plus the Resume Library, AI Candidate
+  Search, Ask AI, Recruiter Briefs, Review History, and AI Investigations pages,
+  backed by FastAPI, PostgreSQL/pgvector, the recruiter-brief workflow, and one
+  separately bounded read-only investigation agent.
 
-There is still no background worker, production identity provider, persisted
-score snapshot, object store, or production deployment control plane.
+There is one PostgreSQL-backed document-ingestion worker. There is still no
+production identity provider, persisted score snapshot, object store, or
+production deployment control plane.
 
 ## End-to-end data flow
 
@@ -21,12 +23,13 @@ Browser ──> Streamlit (app.py, frontend/views/*)
               │
               └─ frontend/api_client.py ── HTTP, server-side bearer token + X-Tenant-ID ──┐
                                                                                            ▼
-FastAPI api/main.py, api/workflows.py
+FastAPI api/main.py, api/workflows.py, api/investigations.py, api/ingestion.py
   authorized(role): token grant ⊇ tenant? role? ── else 401/403, before any DB session
   │
-  ├─ Documents:  bounded read → parse_document_from_bytes (signature/size/pages/DOCX caps)
-  │              → ≤500 chunks → MiniLM embed → documents / document_versions / document_chunks
-  │              (filename persisted only as document.<ext>; identical bytes idempotent)
+  ├─ Ingestion:  bounded read → ingestion_jobs (queued, temporary bytes) → worker lease/claim
+  │              → parse_document_from_bytes (signature/size/pages/DOCX caps) → ≤500 chunks
+  │              → MiniLM embed → atomic documents / versions / chunks + completed job
+  │              (payload purged at terminal state; filename stored only as document.<ext>)
   ├─ Search:     RetrievalPipeline.search → pgvector cosine + tsvector FTS (tenant, current
   │              version, document filters) → RRF → optional cross-encoder → redacted display text
   ├─ Generation: policy gate (key + tenant policy) → RetrievalPipeline.retrieve → build_context
@@ -34,19 +37,24 @@ FastAPI api/main.py, api/workflows.py
   │              structured output → strict Pydantic → citation verification → response + sources
   └─ Workflows:  workflow_runs row (tenant index) → RecruiterBriefWorkflow (LangGraph)
                  → PostgresSaver checkpoints → interrupt → reviewer resume → workflow_reviews
+  └─ Investigate: investigation_runs (immutable version scope) → InvestigationAgent
+                  → model-selected fixed read-only tool → sanitized investigation_events
+                  → verified report → interrupt → reviewer resume → investigation_reviews
 ```
 
 | Capability | Files |
 |---|---|
 | UI shell, mode detection, navigation | `app.py`, `frontend/context.py`, `frontend/components.py` |
 | Typed HTTP client | `frontend/api_client.py`, contracts in `api/schemas.py` |
-| Pages | `frontend/views/{overview,library,ranking,search,ask,briefs,history}.py` |
+| Pages | `frontend/views/{overview,library,ranking,search,ask,briefs,investigations,history}.py` |
 | Deterministic ranking | `services/ranking.py`, `utils/{scoring,matcher,skills_extractor,candidate_analyzer}.py` |
 | Auth, roles, policy | `api/auth.py`, `retrieval/authorization.py`, `api/policy.py`, `api/dependencies.py` |
-| Document persistence | `repositories/documents.py`, `db/models.py`, `migrations/versions/0001…0003` |
+| Document persistence | `repositories/documents.py`, `db/models.py`, `migrations/versions/0001…0005` |
+| Background ingestion | `api/ingestion.py`, `ingestion/worker.py`, `repositories/ingestion_jobs.py`, migration `0005` |
 | Retrieval | `retrieval/{pipeline,fusion,reranker,context,contracts}.py`, `services/embeddings.py` |
 | Grounded generation | `generation/{service,prompts,schemas,citations,providers}.py`, `api/presenters.py` |
 | Review workflow | `workflows/recruiter_brief.py`, `workflows/checkpointing.py`, `repositories/workflow_{runs,reviews}.py` |
+| Investigation agent | `investigations/`, `api/investigations.py`, `repositories/investigations.py` |
 
 ## Streamlit → FastAPI integration
 
@@ -83,6 +91,27 @@ versioned `ParsedDocument` with section-aware chunks and exact offsets (PDF
 pages; DOCX `page_number=None`). The API rejects documents over 500 chunks
 before embedding. Changed bytes create a new immutable version that becomes the
 only retrieval-active version; identical bytes return the existing version.
+The connected Resume Library queues this work. The legacy synchronous endpoints
+remain available as compatibility contracts.
+
+## Durable background ingestion
+
+The API authorizes the editor before accepting bytes, stores only an opaque
+extension and bounded payload in `ingestion_jobs`, and returns `202`. A separate
+worker claims due rows with `FOR UPDATE SKIP LOCKED`, a processing lease, and a
+maximum attempt count. Retryable failures return to `queued` with bounded
+exponential backoff; parser and data-quality failures are terminal. An expired
+lease is reclaimable after worker loss.
+
+The worker holds the claimed row lock while parsing, embedding, persisting the
+document/version/chunks, marking the result, and purging the payload in one
+transaction. A crash before commit therefore leaves neither a partial version
+nor a falsely completed job. Document content hashes and tenant-scoped request
+keys provide a second idempotency boundary. Reindex jobs replace all vectors for
+one authorized version and update its embedding model/package version atomically.
+Metrics are derived from tenant-filtered job rows and contain only state counts,
+queue age, throughput, and latency. See `BACKGROUND_INGESTION.md` for the
+PostgreSQL-versus-Celery decision and operational limits.
 
 ## Hybrid retrieval and reranking
 
@@ -137,6 +166,38 @@ denial, no evidence, retrieval, generation, or citation failures (fixed error co
   idempotently from checkpoint state.
 - Alembic ignores LangGraph-owned checkpoint tables (`migrations/env.py`).
 
+## Bounded investigation agent
+
+`InvestigationAgent` is the only tool-using agent. Gemini chooses its next action
+through provider-supported structured tool calls; LangGraph conditionally routes
+to one of `search_evidence`, `inspect_document`, `check_requirements`,
+`get_review_history`, or `draft_investigation`. The server dispatcher validates
+arguments and tenant/document/version scope before every call. Tools are
+read-only, retrieved text is untrusted, and no tool can alter scope, scores,
+documents, reviews, or applicant outcomes.
+
+Creation is synchronous. `POST /v1/investigations` commits queued/running rows,
+runs at most six tool calls and three planner iterations under token/cost/time
+budgets, persists sanitized events, then returns at human review or failure.
+There is no worker, polling stream, or fabricated progress. PostgresSaver holds
+graph state; `investigation_runs`, `investigation_events`, and
+`investigation_reviews` hold tenant-filtered presentation/audit records. GET
+routes load the tenant row before checkpoint access. Human review requires the
+reviewer role and applies only to generated notes.
+
+### Investigation validation boundary
+
+`data/investigation_eval_v1.json` and `evals/run_investigation_eval.py` exercise
+the real graph, conditional router, server tool dispatcher, context redaction,
+budget enforcement, structured report validation, and exact-citation verifier
+with a deterministic scripted provider. The cases cover direct evidence,
+ambiguity, no evidence, adaptive follow-up search, contradictions,
+multi-document scope, prompt injection, unauthorized references, budget
+exhaustion, invalid arguments, unavailable tools, and hallucinated quotes. CI
+runs this benchmark and `evals/quality_gate.py` requires all policy metrics to
+remain at their documented thresholds. This is an orchestration regression
+test, not a live-model or retrieval-relevance evaluation.
+
 ## Standalone fallback
 
 With `API_BASE_URL` unset, `resolve_context` returns Standalone mode without any
@@ -154,12 +215,22 @@ Rollback to Standalone is achieved by unsetting `API_BASE_URL`.
    variables; no expiry, rotation, user identity, or audit of access events.
 3. **Ranking audit (medium):** ranking results and manual ranking decisions are
    session-only and exported by the user; there is no immutable score snapshot.
-4. **Synchronous processing (medium):** parsing, embedding, reranking, and
-   generation run in request threads; large batches block the UI request.
+4. **Mixed execution model (medium):** library parsing/embedding is background,
+   but legacy uploads, reranking, generation, and investigations remain in request threads.
 5. **Parser and provider risk (medium):** no malware scanning or OCR isolation;
    live provider behavior, cost, and retention are unvalidated in this repository.
 6. **Supply chain (medium):** dependencies are range-constrained, not locked;
    models download at runtime into a cache volume.
+7. **Historical-data retention (high):** document deletion removes document
+   rows, chunks, and vectors, but historical workflow/investigation rows and
+   LangGraph checkpoints can retain redacted excerpts. A retention/deletion
+   policy and tested purge path are required before non-synthetic use.
+8. **Mid-execution recovery (medium):** review interrupts resume durably, but a
+   process loss during synchronous planning leaves a diagnostic queued/running
+   record; there is no worker that automatically continues it.
+9. **Queue payload storage (medium):** bounded original bytes live temporarily
+   in PostgreSQL until terminal processing. There is no object store, malware
+   scanner, autoscaling, or high-concurrency claim/load validation.
 
 ## Deliberately out of scope
 

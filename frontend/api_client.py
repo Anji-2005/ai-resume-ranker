@@ -27,6 +27,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 CONNECT_TIMEOUT = 3.0
 READ_TIMEOUT = 30.0
 LONG_TIMEOUT = 180.0
+INVESTIGATION_TIMEOUT = 210.0  # server budget is 180 s; allow transport and persistence overhead
 RETRY_ATTEMPTS = 2
 RETRY_BACKOFF_SECONDS = 0.5
 RETRYABLE_STATUSES = {502, 503, 504}
@@ -182,6 +183,19 @@ class ApiClient:
     def get_workflow(self, workflow_id: UUID) -> schemas.WorkflowView:
         return self._parse(self._request("GET", f"/v1/workflows/{workflow_id}", retry=True), schemas.WorkflowView)
 
+    def list_investigations(self, status: str | None = None) -> schemas.InvestigationListResponse:
+        params = {"status": status} if status else None
+        return self._parse(
+            self._request("GET", "/v1/investigations", params=params, retry=True),
+            schemas.InvestigationListResponse,
+        )
+
+    def get_investigation(self, investigation_id: UUID) -> schemas.InvestigationView:
+        return self._parse(
+            self._request("GET", f"/v1/investigations/{investigation_id}", retry=True),
+            schemas.InvestigationView,
+        )
+
     # Mutating or provider-billed operations are never retried automatically.
     def upload_document(self, filename: str, data: bytes) -> schemas.IngestResponse:
         response = self._request("POST", "/v1/documents", files={"file": (_opaque_upload_name(filename), data)},
@@ -192,6 +206,55 @@ class ApiClient:
         response = self._request("POST", f"/v1/documents/{document_id}/versions",
                                  files={"file": (_opaque_upload_name(filename), data)}, timeout=LONG_TIMEOUT)
         return self._parse(response, schemas.IngestResponse)
+
+    def enqueue_document(self, filename: str, data: bytes, *, idempotency_key: str) -> schemas.IngestionJobView:
+        response = self._request(
+            "POST", "/v1/ingestion-jobs",
+            headers={"Idempotency-Key": idempotency_key},
+            files={"file": (_opaque_upload_name(filename), data)},
+            timeout=LONG_TIMEOUT,
+        )
+        return self._parse(response, schemas.IngestionJobView)
+
+    def enqueue_document_version(self, document_id: UUID, filename: str, data: bytes, *,
+                                 idempotency_key: str) -> schemas.IngestionJobView:
+        response = self._request(
+            "POST", f"/v1/documents/{document_id}/ingestion-jobs",
+            headers={"Idempotency-Key": idempotency_key},
+            files={"file": (_opaque_upload_name(filename), data)},
+            timeout=LONG_TIMEOUT,
+        )
+        return self._parse(response, schemas.IngestionJobView)
+
+    def enqueue_reindex(self, document_id: UUID, *, version_number: int | None,
+                        idempotency_key: str) -> schemas.IngestionJobView:
+        request = schemas.ReindexRequest(version_number=version_number)
+        response = self._request(
+            "POST", f"/v1/documents/{document_id}/reindex",
+            headers={"Idempotency-Key": idempotency_key}, json=request.model_dump(),
+        )
+        return self._parse(response, schemas.IngestionJobView)
+
+    def list_ingestion_jobs(self, status: str | None = None, limit: int = 100) -> schemas.IngestionJobListResponse:
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        return self._parse(
+            self._request("GET", "/v1/ingestion-jobs", params=params, retry=True),
+            schemas.IngestionJobListResponse,
+        )
+
+    def get_ingestion_job(self, job_id: UUID) -> schemas.IngestionJobView:
+        return self._parse(
+            self._request("GET", f"/v1/ingestion-jobs/{job_id}", retry=True),
+            schemas.IngestionJobView,
+        )
+
+    def ingestion_metrics(self) -> schemas.IngestionMetricsResponse:
+        return self._parse(
+            self._request("GET", "/v1/ingestion-jobs/metrics", retry=True),
+            schemas.IngestionMetricsResponse,
+        )
 
     def delete_document(self, document_id: UUID) -> None:
         self._request("DELETE", f"/v1/documents/{document_id}")
@@ -215,6 +278,31 @@ class ApiClient:
         request = schemas.ReviewSubmission(approved=approved, note=note)
         response = self._request("POST", f"/v1/workflows/{workflow_id}/review", json=request.model_dump())
         return self._parse(response, schemas.WorkflowView)
+
+    def start_investigation(self, *, objective: str, document_ids, idempotency_key: str,
+                            job_description: str = "", requirements=()) -> schemas.InvestigationView:
+        request = schemas.InvestigationCreateRequest(
+            objective=objective,
+            document_ids=list(document_ids),
+            job_description=job_description,
+            requirements=list(requirements),
+        )
+        response = self._request(
+            "POST", "/v1/investigations",
+            headers={"Idempotency-Key": idempotency_key},
+            json=request.model_dump(mode="json"),
+            timeout=INVESTIGATION_TIMEOUT,
+        )
+        return self._parse(response, schemas.InvestigationView)
+
+    def review_investigation(self, investigation_id: UUID, *, approved: bool,
+                             comment: str = "") -> schemas.InvestigationView:
+        request = schemas.InvestigationReviewSubmission(approved=approved, comment=comment)
+        response = self._request(
+            "POST", f"/v1/investigations/{investigation_id}/review",
+            json=request.model_dump(),
+        )
+        return self._parse(response, schemas.InvestigationView)
 
 
 def _opaque_upload_name(filename: str) -> str:

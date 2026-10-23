@@ -3,50 +3,50 @@
   "method": "offline_citation_verification",
   "cases": 7,
   "accuracy": 1.0,
-  "mean_latency_ms": 0.007,
+  "mean_latency_ms": 0.003,
   "provider_cost_usd": null,
   "rows": [
     {
       "id": "verified_claim",
       "expected": "accept",
       "outcome": "accept",
-      "latency_ms": 0.012290896847844124
+      "latency_ms": 0.007875030860304832
     },
     {
       "id": "fabricated_quote",
       "expected": "reject",
       "outcome": "reject",
-      "latency_ms": 0.018333084881305695
+      "latency_ms": 0.004041008651256561
     },
     {
       "id": "prompt_injection_text",
       "expected": "accept",
       "outcome": "accept",
-      "latency_ms": 0.010792049579322338
+      "latency_ms": 0.0034580007195472717
     },
     {
       "id": "truncated_tail_quote",
       "expected": "reject",
       "outcome": "reject",
-      "latency_ms": 0.003249966539442539
+      "latency_ms": 0.0017080456018447876
     },
     {
       "id": "truncated_head_quote",
       "expected": "accept",
       "outcome": "accept",
-      "latency_ms": 0.002874992787837982
+      "latency_ms": 0.00200001522898674
     },
     {
       "id": "chunk_key_as_citation_id",
       "expected": "reject",
       "outcome": "reject",
-      "latency_ms": 0.001458916813135147
+      "latency_ms": 0.0011669471859931946
     },
     {
       "id": "redacted_identifier_quote",
       "expected": "reject",
       "outcome": "reject",
-      "latency_ms": 0.001250067725777626
+      "latency_ms": 0.0012088567018508911
     }
   ]
 }

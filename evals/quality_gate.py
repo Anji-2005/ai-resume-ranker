@@ -4,10 +4,18 @@ import json
 from pathlib import Path
 
 
-def require_quality(retrieval_path, generation_path, offline_path="evals/latest_offline_quality.json"):
+def require_quality(
+    retrieval_path,
+    generation_path,
+    offline_path="evals/latest_offline_quality.json",
+    investigation_path="evals/latest_investigation_eval.json",
+    ingestion_path="evals/latest_ingestion_benchmark.json",
+):
     retrieval = json.loads(Path(retrieval_path).read_text())["metrics"]
     generation = json.loads(Path(generation_path).read_text())
     offline = json.loads(Path(offline_path).read_text())
+    investigation = json.loads(Path(investigation_path).read_text())["metrics"]
+    ingestion = json.loads(Path(ingestion_path).read_text())
     failures = []
     if retrieval["recall_at_5"] < 1.0:
         failures.append("whole-document baseline Recall@5 fell below 1.0")
@@ -22,6 +30,22 @@ def require_quality(retrieval_path, generation_path, offline_path="evals/latest_
             failures.append(f"{metric} fell below 1.0")
     if offline["sensitive_content_acceptance_rate"] > 0.0:
         failures.append("sensitive content acceptance rate exceeded 0.0")
+    for metric in (
+        "task_completion_rate",
+        "scenario_outcome_accuracy",
+        "tool_selection_correctness",
+        "citation_validity",
+        "unsupported_claim_rejection_rate",
+        "authorization_block_rate",
+    ):
+        if investigation[metric] < 1.0:
+            failures.append(f"investigation {metric} fell below 1.0")
+    if investigation["authorization_violation_count"] != 0:
+        failures.append("investigation authorization violations exceeded 0")
+    if ingestion["completed"] != ingestion["documents"] or ingestion["failed"] != 0:
+        failures.append("synthetic background ingestion did not complete every document")
+    if ingestion["success_rate"] < 1.0:
+        failures.append("synthetic background ingestion success rate fell below 1.0")
     if failures:
         raise SystemExit("Quality gate failed: " + "; ".join(failures))
     print("Synthetic quality gate passed")

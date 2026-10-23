@@ -19,7 +19,7 @@ from frontend.api_client import ApiClient, config_from_env  # noqa: E402
 
 APP_PATH = str(Path(__file__).resolve().parents[1] / "app.py")
 PAGES = ["Overview", "Resume Library", "Candidate Ranking", "AI Candidate Search", "Ask AI",
-         "Recruiter Briefs", "Review History"]
+         "Recruiter Briefs", "AI Investigations", "Review History"]
 
 
 def synthetic_docx():
@@ -44,7 +44,7 @@ def main():
             at.sidebar.radio(key="nav").set_value(page).run()
             assert not at.exception, (page, at.exception)
         at.sidebar.radio(key="nav").set_value("AI Candidate Search").run()
-        at.text_input(key="search_query").input("Python PostgreSQL").run()
+        at.text_input(key="search_query").input("Python PostgreSQL")
         next(button for button in at.button if button.label == "Search").click().run()
         assert not at.exception, at.exception
         rendered = " ".join(str(element.value) for element in at.markdown)

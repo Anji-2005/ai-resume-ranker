@@ -7,6 +7,8 @@ generation to be unconfigured (503) or policy-denied (403) unless
 
 from io import BytesIO
 import os
+import time
+from uuid import uuid4
 
 from docx import Document
 import httpx
@@ -23,6 +25,18 @@ def synthetic_docx(*paragraphs):
 
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def wait_for_job(client, job_id, headers, timeout_seconds=120):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        response = client.get(f"/v1/ingestion-jobs/{job_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        job = response.json()
+        if job["status"] in {"completed", "failed"}:
+            return job
+        time.sleep(1)
+    raise AssertionError(f"ingestion job did not reach a terminal state within {timeout_seconds}s")
 
 
 def main():
@@ -59,6 +73,32 @@ def main():
         assert repeat.status_code == 201 and repeat.json()["created"] is False, repeat.text
         checks.append("ingest+idempotency")
 
+        background_data = synthetic_docx(
+            "Maintained Python data pipelines for a fictional warehouse.",
+        )
+        background_headers = {**headers, "Idempotency-Key": "synthetic-smoke-" + uuid4().hex}
+        queued = client.post(
+            "/v1/ingestion-jobs", headers=background_headers,
+            files={"file": ("Fictional Background Person.docx", background_data, DOCX)},
+        )
+        assert queued.status_code in {200, 202}, queued.text
+        replay = client.post(
+            "/v1/ingestion-jobs", headers=background_headers,
+            files={"file": ("Different Identity.docx", background_data, DOCX)},
+        )
+        assert replay.status_code == 200 and replay.json()["job_id"] == queued.json()["job_id"], replay.text
+        hidden = client.get(
+            f"/v1/ingestion-jobs/{queued.json()['job_id']}",
+            headers={"X-Tenant-ID": "other-tenant", "Authorization": f"Bearer {token}"},
+        )
+        assert hidden.status_code in {403, 404}, hidden.text
+        background = wait_for_job(client, queued.json()["job_id"], headers)
+        assert background["status"] == "completed", background
+        background_document_id = background["document_id"]
+        metrics = client.get("/v1/ingestion-jobs/metrics", headers=headers)
+        assert metrics.status_code == 200 and metrics.json()["counts"]["completed"] >= 1, metrics.text
+        checks.append("background ingest+idempotency+status+tenant isolation")
+
         listing = client.get("/v1/documents", headers=headers)
         assert listing.status_code == 200 and any(d["document_id"] == document_id for d in listing.json()["documents"])
         assert "Fictional Person" not in listing.text
@@ -84,11 +124,23 @@ def main():
             workflow = client.post("/v1/workflows/recruiter-brief", headers=headers, json={
                 "description": "Python engineer", "document_ids": [document_id]})
             assert workflow.status_code == expected, workflow.text
+            investigation = client.post(
+                "/v1/investigations",
+                headers={**headers, "Idempotency-Key": "synthetic-smoke-investigation"},
+                json={
+                    "objective": "Investigate Python API evidence",
+                    "document_ids": [document_id],
+                    "requirements": ["Python"],
+                },
+            )
+            assert investigation.status_code == expected, investigation.text
             checks.append(f"generation gate fails closed ({expected})")
 
         history = client.get("/v1/workflows", headers=headers)
         assert history.status_code == 200, history.text
-        checks.append("workflow history")
+        investigation_history = client.get("/v1/investigations", headers=headers)
+        assert investigation_history.status_code == 200, investigation_history.text
+        checks.append("workflow+investigation history")
 
         if reader_token:
             reader = {"X-Tenant-ID": tenant, "Authorization": f"Bearer {reader_token}"}
@@ -103,6 +155,8 @@ def main():
         after = client.post("/v1/documents/search", json={"query": "Python FastAPI"}, headers=headers)
         assert all(item["document_id"] != document_id for item in after.json())
         assert client.get(f"/v1/documents/{document_id}", headers=headers).status_code == 404
+        background_deleted = client.delete(f"/v1/documents/{background_document_id}", headers=headers)
+        assert background_deleted.status_code == 204, background_deleted.text
         checks.append("physical deletion")
 
     print("API smoke passed: " + ", ".join(checks))

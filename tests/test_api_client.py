@@ -16,8 +16,11 @@ from fakes import (
     CitingProvider,
     FakeEmbedder,
     InMemoryDocumentRepository,
+    InMemoryInvestigationRepository,
+    InMemoryIngestionJobRepository,
     InMemoryReviewRepository,
     InMemoryRunRepository,
+    InvestigationToolProvider,
     synthetic_docx,
 )
 
@@ -65,8 +68,13 @@ def test_safe_reads_retry_transient_failures():
 @pytest.mark.parametrize("operation", [
     lambda c: c.delete_document(uuid4()),
     lambda c: c.upload_document("cv.pdf", b"%PDF"),
+    lambda c: c.enqueue_document("cv.pdf", b"%PDF", idempotency_key="upload-test-001"),
     lambda c: c.ask("question"),
     lambda c: c.submit_review(uuid4(), approved=True),
+    lambda c: c.start_investigation(
+        objective="Python", document_ids=[uuid4()], idempotency_key=str(uuid4()),
+    ),
+    lambda c: c.review_investigation(uuid4(), approved=True),
 ])
 def test_mutating_and_generation_calls_are_never_retried(operation):
     client, calls = client_with(lambda request: httpx.Response(503, json={"detail": "busy"}))
@@ -120,6 +128,26 @@ def test_upload_never_sends_original_filename():
     assert b"Jane Doe" not in seen["body"] and b'filename="document.docx"' in seen["body"]
 
 
+def test_background_upload_never_sends_original_filename_or_retries():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = request.content
+        return httpx.Response(202, json={
+            "job_id": str(uuid4()), "job_type": "ingest", "status": "queued",
+            "attempt_count": 0, "max_attempts": 3, "embedding_model": "m",
+            "embedding_model_version": "1", "queued_at": "2026-10-16T00:00:00Z",
+        })
+
+    client, calls = client_with(handler)
+    result = client.enqueue_document(
+        "Jane Doe Resume.DOCX", b"bytes", idempotency_key="upload-client-test-001",
+    )
+    assert result.status == "queued" and len(calls) == 1
+    assert b"Jane Doe" not in seen["body"] and b'filename="document.docx"' in seen["body"]
+    assert calls[0].headers["Idempotency-Key"] == "upload-client-test-001"
+
+
 def test_contract_violation_is_reported():
     client, _ = client_with(lambda request: httpx.Response(200, json={"unexpected": True}))
     with pytest.raises(ApiError) as error:
@@ -133,12 +161,17 @@ def live_client(monkeypatch):
     repository, runs, reviews, saver = (
         InMemoryDocumentRepository(), InMemoryRunRepository(), InMemoryReviewRepository(), InMemorySaver()
     )
+    investigations = InMemoryInvestigationRepository()
+    ingestion_jobs = InMemoryIngestionJobRepository()
     app.dependency_overrides.update({
         dependencies.get_document_repository: lambda: repository,
         dependencies.get_retrieval_pipeline: lambda: RetrievalPipeline(repository, embedder=FakeEmbedder()),
         dependencies.get_run_repository: lambda: runs,
         dependencies.get_review_repository: lambda: reviews,
         dependencies.get_generation_provider: lambda: CitingProvider(),
+        dependencies.get_investigation_provider: lambda: InvestigationToolProvider(),
+        dependencies.get_investigation_repository: lambda: investigations,
+        dependencies.get_ingestion_job_repository: lambda: ingestion_jobs,
         dependencies.get_generation_status: lambda: "enabled",
         dependencies.get_database_status: lambda: "ok",
         dependencies.get_checkpointer: lambda: saver,
@@ -169,5 +202,18 @@ def test_client_round_trip_against_fastapi_contract(live_client):
     with pytest.raises(ApiError) as duplicate:
         live_client.submit_review(started.workflow_id, approved=True)
     assert duplicate.value.status == 409
+    investigation = live_client.start_investigation(
+        objective="Investigate Python evidence",
+        document_ids=[ingested.document_id],
+        idempotency_key=str(uuid4()),
+        requirements=["Python"],
+    )
+    assert investigation.status == "awaiting_review"
+    assert investigation.events and investigation.report.supported_findings
+    reviewed_investigation = live_client.review_investigation(
+        investigation.investigation_id, approved=True, comment="Citations checked",
+    )
+    assert reviewed_investigation.status == "completed"
+    assert live_client.list_investigations().investigations[0].outcome == "approved"
     live_client.delete_document(ingested.document_id)
     assert live_client.list_documents().total == 0

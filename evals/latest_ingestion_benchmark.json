@@ -1,0 +1,24 @@
+{
+  "dataset_version": "synthetic-ingestion-v1",
+  "benchmark_version": "postgres-worker-ingestion-v1",
+  "generated_at": "2026-10-16T19:03:58.603298+00:00",
+  "embedding_mode": "deterministic fake (parser/DB/worker only)",
+  "documents": 6,
+  "processed_claims": 6,
+  "completed": 6,
+  "failed": 0,
+  "success_rate": 1.0,
+  "total_input_bytes": 112977,
+  "wall_seconds": 0.10842033312655985,
+  "throughput_documents_per_second": 55.3401730743269,
+  "throughput_bytes_per_second": 1042027.7889030383,
+  "mean_processing_latency_ms": 9.882451190302769,
+  "p50_processing_latency_ms": 8.975208038464189,
+  "p95_processing_latency_ms": 17.124833073467016,
+  "live_model_calls": 0,
+  "limitations": [
+    "Single worker and six small synthetic documents; this is not a concurrency or load test.",
+    "A deterministic fake embedder excludes production model load and inference latency.",
+    "Local PostgreSQL and filesystem/cache conditions materially affect timings."
+  ]
+}

@@ -2,12 +2,13 @@
 
 from dataclasses import dataclass
 import hashlib
+import math
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
-from db.models import StoredDocument, StoredDocumentChunk, StoredDocumentVersion
+from db.models import EMBEDDING_DIMENSIONS, StoredDocument, StoredDocumentChunk, StoredDocumentVersion
 from services.embeddings import SentenceTransformerEmbedder
 from utils.pdf_parser import parse_document_from_bytes
 from retrieval.contracts import MetadataFilters, RetrievalCandidate
@@ -32,6 +33,8 @@ class VersionRow:
     media_type: str
     parser_name: str
     parser_version: str
+    embedding_model: str
+    embedding_model_version: str
     content_hash: str
     chunk_count: int
     created_at: object
@@ -44,10 +47,52 @@ class IngestionResult:
     version_number: int
     created: bool
     embedding_model: str
+    embedding_model_version: str = "unknown"
 
 
 class DocumentTooLargeError(ValueError):
     pass
+
+
+class DocumentQualityError(ValueError):
+    """Safe data-quality failure whose message never includes candidate content."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def embedding_identity(embedder) -> tuple[str, str]:
+    return str(embedder.model_name), str(getattr(embedder, "model_version", "unknown"))
+
+
+def _validate_parsed_document(parsed):
+    if not parsed.text.strip() or not parsed.chunks:
+        raise DocumentQualityError("empty_document", "The document contains no extractable text.")
+    for chunk in parsed.chunks:
+        if (not chunk.text.strip() or chunk.source_start < 0 or chunk.source_end <= chunk.source_start
+                or chunk.source_end > len(parsed.text)):
+            raise DocumentQualityError("invalid_metadata", "The parser returned invalid document metadata.")
+
+
+def _validated_vectors(vectors, expected_count):
+    if len(vectors) != expected_count:
+        raise DocumentQualityError(
+            "embedding_invalid", "The embedding provider returned an unexpected vector count."
+        )
+    normalized = []
+    for vector in vectors:
+        if len(vector) != EMBEDDING_DIMENSIONS:
+            raise DocumentQualityError(
+                "embedding_invalid", "The embedding provider returned an incompatible vector dimension."
+            )
+        values = [float(value) for value in vector]
+        if not all(math.isfinite(value) for value in values):
+            raise DocumentQualityError(
+                "embedding_invalid", "The embedding provider returned a non-finite vector."
+            )
+        normalized.append(values)
+    return normalized
 
 
 class DocumentRepository:
@@ -58,9 +103,11 @@ class DocumentRepository:
         self.embedder = embedder or SentenceTransformerEmbedder()
 
     def ingest_bytes(self, tenant_id: str, source_key: str, filename: str, data: bytes,
-                     max_chunks: int | None = None) -> IngestionResult:
+                     max_chunks: int | None = None,
+                     target_document_id: UUID | None = None) -> IngestionResult:
         _validate_scope(tenant_id, source_key)
         parsed = parse_document_from_bytes(filename, data)
+        _validate_parsed_document(parsed)
         if max_chunks is not None and len(parsed.chunks) > max_chunks:
             # Bound embedding work and storage before any vector is computed.
             raise DocumentTooLargeError(f"document exceeds the {max_chunks}-chunk ingestion limit")
@@ -70,6 +117,10 @@ class DocumentRepository:
                 StoredDocument.tenant_id == tenant_id, StoredDocument.source_key == source_key
             ).with_for_update()
         )
+        if target_document_id is not None and (
+            existing is None or existing.id != target_document_id or existing.deleted_at is not None
+        ):
+            raise LookupError("document not found")
         if existing is None:
             document = StoredDocument(tenant_id=tenant_id, source_key=source_key)
             self.session.add(document)
@@ -86,16 +137,18 @@ class DocumentRepository:
             )
             if known is not None:
                 return IngestionResult(
-                    document.id, known.id, known.version_number, False, self.embedder.model_name
+                    document.id, known.id, known.version_number, False,
+                    known.embedding_model, known.embedding_model_version,
                 )
         last_version = self.session.scalar(
             select(func.max(StoredDocumentVersion.version_number)).where(
                 StoredDocumentVersion.document_id == document.id
             )
         ) or 0
-        vectors = self.embedder.embed([chunk.text for chunk in parsed.chunks])
-        if len(vectors) != len(parsed.chunks):
-            raise RuntimeError("embedding provider returned an unexpected vector count")
+        vectors = _validated_vectors(
+            self.embedder.embed([chunk.text for chunk in parsed.chunks]), len(parsed.chunks)
+        )
+        model_name, model_version = embedding_identity(self.embedder)
         self.session.query(StoredDocumentVersion).filter(
             StoredDocumentVersion.document_id == document.id
         ).update({StoredDocumentVersion.is_current: False}, synchronize_session=False)
@@ -103,6 +156,7 @@ class DocumentRepository:
             document_id=document.id, version_number=last_version + 1, content_hash=digest,
             filename=filename, media_type=parsed.media_type, parser_name=parsed.parser_name,
             parser_version=parsed.parser_version, parsed_document=parsed.model_dump(mode="json"), is_current=True,
+            embedding_model=model_name, embedding_model_version=model_version,
         )
         self.session.add(version)
         self.session.flush()
@@ -113,7 +167,44 @@ class DocumentRepository:
                 source_start=chunk.source_start, source_end=chunk.source_end,
                 content=chunk.text, embedding=vector,
             ))
-        return IngestionResult(document.id, version.id, version.version_number, True, self.embedder.model_name)
+        return IngestionResult(
+            document.id, version.id, version.version_number, True, model_name, model_version,
+        )
+
+    def reindex_version(self, tenant_id: str, document_id: UUID, version_number: int) -> IngestionResult:
+        """Replace one authorized version's vectors and embedding identity atomically."""
+        _validate_tenant(tenant_id)
+        version = self.session.scalar(
+            select(StoredDocumentVersion)
+            .join(StoredDocument, StoredDocument.id == StoredDocumentVersion.document_id)
+            .where(
+                StoredDocument.tenant_id == tenant_id,
+                StoredDocument.deleted_at.is_(None),
+                StoredDocument.id == document_id,
+                StoredDocumentVersion.version_number == version_number,
+            ).with_for_update()
+        )
+        if version is None:
+            raise LookupError("document version not found")
+        chunks = list(self.session.scalars(
+            select(StoredDocumentChunk)
+            .where(StoredDocumentChunk.document_version_id == version.id)
+            .order_by(StoredDocumentChunk.source_start, StoredDocumentChunk.chunk_key)
+        ).all())
+        if not chunks:
+            raise DocumentQualityError(
+                "empty_document", "The document version contains no indexable chunks."
+            )
+        vectors = _validated_vectors(self.embedder.embed([chunk.content for chunk in chunks]), len(chunks))
+        for chunk, vector in zip(chunks, vectors, strict=True):
+            chunk.embedding = vector
+        model_name, model_version = embedding_identity(self.embedder)
+        version.embedding_model = model_name
+        version.embedding_model_version = model_version
+        version.embedding_updated_at = func.now()
+        return IngestionResult(
+            document_id, version.id, version.version_number, False, model_name, model_version,
+        )
 
     def search_dense(self, tenant_id: str, vector: list[float], filters: MetadataFilters,
                      limit: int) -> list[RetrievalCandidate]:
@@ -196,7 +287,10 @@ class DocumentRepository:
             VersionRow(
                 version_id=version.id, version_number=version.version_number, is_current=version.is_current,
                 media_type=version.media_type, parser_name=version.parser_name,
-                parser_version=version.parser_version, content_hash=version.content_hash,
+                parser_version=version.parser_version,
+                embedding_model=version.embedding_model,
+                embedding_model_version=version.embedding_model_version,
+                content_hash=version.content_hash,
                 chunk_count=self.count_chunks(version.id), created_at=version.created_at,
             )
             for version in versions
@@ -246,12 +340,15 @@ def _active_chunks(tenant_id: str, filters: MetadataFilters) -> Select:
         StoredDocumentVersion, StoredDocumentVersion.id == StoredDocumentChunk.document_version_id
     ).where(
         StoredDocumentChunk.tenant_id == tenant_id, StoredDocument.deleted_at.is_(None),
-        StoredDocumentVersion.is_current.is_(True),
     )
+    # Explicit version filters are used by durable workflows to pin their
+    # evidence scope. Ordinary search still sees the current version only.
     if filters.document_ids:
         statement = statement.where(StoredDocumentChunk.document_id.in_(filters.document_ids))
     if filters.document_version_ids:
         statement = statement.where(StoredDocumentChunk.document_version_id.in_(filters.document_version_ids))
+    else:
+        statement = statement.where(StoredDocumentVersion.is_current.is_(True))
     if filters.source_keys:
         statement = statement.where(StoredDocument.source_key.in_(filters.source_keys))
     if filters.media_types:

@@ -1,6 +1,7 @@
 """Resume Library: persistent, tenant-scoped V2 document storage."""
 
-from uuid import UUID
+import hashlib
+from uuid import UUID, uuid4
 
 import streamlit as st
 
@@ -13,29 +14,65 @@ MAX_BATCH_FILES = 20
 
 
 def _upload_batch(ctx, files):
-    """Upload files one by one with per-file status; failures never stop the batch."""
+    """Queue files one by one; the worker performs parsing and indexing later."""
     rows = []
-    with st.status(f"Processing {len(files)} file(s)…", expanded=True) as status:
+    with st.status(f"Queueing {len(files)} file(s)…", expanded=True) as status:
         for index, file in enumerate(files, start=1):
             # Filenames are never displayed or sent: they may identify the candidate.
             label = f"File {index:02d}"
-            st.write(f"{label}: validating, parsing, embedding, and indexing…")
+            st.write(f"{label}: validating upload bounds and creating a durable job…")
             try:
-                result = ctx.client.upload_document(file.name, file.getvalue())
-                outcome = "Stored new document" if result.created and result.version_number == 1 else (
-                    f"Stored as version {result.version_number}" if result.created else "Already stored (unchanged)"
-                )
-                rows.append({"File": label, "Result": "✅ " + outcome, "Candidate": result.candidate_ref,
-                             "Version": result.version_number})
+                data = file.getvalue()
+                key = "upload-" + hashlib.sha256(data).hexdigest()[:32]
+                job = ctx.client.enqueue_document(file.name, data, idempotency_key=key)
+                rows.append({"File": label, "Result": "Queued", "Job": str(job.job_id)[:8],
+                             "Status": job.status})
             except ApiError as exc:
-                rows.append({"File": label, "Result": "❌ " + exc.message, "Candidate": "—", "Version": None})
-        failed = sum(row["Result"].startswith("❌") for row in rows)
+                rows.append({"File": label, "Result": "❌ " + exc.message, "Job": "—", "Status": "failed"})
+        failed = sum(row["Status"] == "failed" for row in rows)
         status.update(
-            label=f"Processed {len(files)} file(s): {len(files) - failed} stored, {failed} failed",
+            label=f"Queued {len(files) - failed} file(s); {failed} upload request(s) failed",
             state="error" if failed == len(files) else "complete", expanded=False,
         )
-    invalidate_documents()
     st.session_state["library_upload_report"] = rows
+
+
+def _job_status_panel(ctx):
+    header, refresh = st.columns([4, 1])
+    header.subheader("Ingestion operations")
+    refresh.button("↻ Refresh jobs", key="library_jobs_refresh", width="stretch")
+    try:
+        jobs = ctx.client.list_ingestion_jobs(limit=100).jobs
+        metrics = ctx.client.ingestion_metrics()
+    except ApiError as exc:
+        show_api_error(exc, "Loading ingestion operations")
+        return
+    cols = st.columns(4)
+    for column, state in zip(cols, ("queued", "processing", "completed", "failed"), strict=True):
+        column.metric(state.replace("_", " ").title(), metrics.counts.get(state, 0))
+    st.caption(
+        f"Last hour: {metrics.completed_last_hour} completed · {metrics.failed_last_hour} failed · "
+        f"{metrics.throughput_per_minute_last_hour:.3f} completed/min"
+    )
+    if not jobs:
+        empty_state("No ingestion jobs have been submitted for this workspace.")
+        return
+    rows = []
+    for job in jobs:
+        result = job.error or (job.candidate_ref if job.status == "completed" else "—")
+        rows.append({
+            "Job": str(job.job_id)[:8], "Type": job.job_type, "Status": job.status,
+            "Attempts": f"{job.attempt_count}/{job.max_attempts}", "Result": result,
+            "Last error": job.error_code or "—",
+            "Version": job.version_number, "Latency ms": job.processing_latency_ms,
+            "Queued": job.queued_at,
+        })
+    st.dataframe(rows, hide_index=True, width="stretch",
+                 column_config={"Queued": st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm:ss")})
+    if any(job.status in {"queued", "processing"} for job in jobs):
+        st.info("Work is running in the background. Refresh this panel for persisted status; no progress is fabricated.")
+    if any(job.status == "completed" for job in jobs):
+        invalidate_documents()
 
 
 def _document_table(documents):
@@ -65,6 +102,7 @@ def _document_detail(ctx, document_id: str):
     versions = [{
         "Version": v.version_number, "Current": "✓" if v.is_current else "", "Chunks": v.chunk_count,
         "Parser": f"{v.parser_name} {v.parser_version}", "Content SHA-256": v.content_sha256_prefix + "…",
+        "Embedding": f"{v.embedding_model} · {v.embedding_model_version}",
         "Uploaded": v.created_at,
     } for v in detail.versions]
     st.markdown("**Version history**")
@@ -93,13 +131,25 @@ def _document_detail(ctx, document_id: str):
         if st.button("Store new version", key=f"library_store_version_{document_id}",
                      disabled=not (can_edit and new_version)):
             try:
-                result = ctx.client.upload_version(UUID(document_id), new_version.name, new_version.getvalue())
-                st.success(f"Stored version {result.version_number}." if result.created
-                           else "This exact file is already stored; no new version was created.")
+                job = ctx.client.enqueue_document_version(
+                    UUID(document_id), new_version.name, new_version.getvalue(),
+                    idempotency_key="version-" + uuid4().hex,
+                )
+                st.success(f"Queued background job {str(job.job_id)[:8]} for a new version.")
                 st.session_state.pop(version_key, None)
-                invalidate_documents()
             except ApiError as exc:
                 show_api_error(exc, "Uploading the new version")
+        st.markdown("**Reindex embeddings**")
+        st.caption("Queues this displayed version for transactional re-embedding with the configured model.")
+        if st.button("Queue reindex", key=f"library_reindex_{document_id}", disabled=not can_edit):
+            try:
+                job = ctx.client.enqueue_reindex(
+                    UUID(document_id), version_number=detail.selected_version_number,
+                    idempotency_key="reindex-" + uuid4().hex,
+                )
+                st.success(f"Queued reindex job {str(job.job_id)[:8]}.")
+            except ApiError as exc:
+                show_api_error(exc, "Queueing reindex")
     with right:
         st.markdown("**Delete document**")
         st.caption("Physically deletes every version, chunk, and embedding for this candidate document.")
@@ -140,6 +190,8 @@ def render(ctx):
             _upload_batch(ctx, files)
         if report := st.session_state.get("library_upload_report"):
             st.dataframe(report, hide_index=True, width="stretch")
+
+    _job_status_panel(ctx)
 
     header, refresh = st.columns([4, 1])
     header.subheader("Stored documents")

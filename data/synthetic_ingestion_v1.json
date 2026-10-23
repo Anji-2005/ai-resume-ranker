@@ -1,0 +1,12 @@
+{
+  "dataset_version": "synthetic-ingestion-v1",
+  "description": "Fictional privacy-safe documents for PostgreSQL worker throughput regression testing.",
+  "documents": [
+    {"id": "docx-python", "format": "docx", "paragraphs": ["Built Python APIs for a fictional bookshop.", "Used PostgreSQL and Docker for local development."]},
+    {"id": "docx-data", "format": "docx", "paragraphs": ["Designed synthetic data pipelines with SQL.", "Documented data-quality checks and recovery procedures.", "Operated scheduled batch processing."]},
+    {"id": "docx-platform", "format": "docx", "paragraphs": ["Maintained Kubernetes services for a fictional platform.", "Implemented metrics, alerts, and runbooks."]},
+    {"id": "pdf-api", "format": "pdf", "paragraphs": ["Created FastAPI services and integration tests for a fictional retailer.", "Improved request validation and provenance tracking."]},
+    {"id": "pdf-cloud", "format": "pdf", "paragraphs": ["Operated synthetic AWS workloads with infrastructure reviews.", "Investigated reliability incidents using redacted telemetry."]},
+    {"id": "pdf-analytics", "format": "pdf", "paragraphs": ["Built privacy-safe analytical datasets.", "Validated schema consistency and deterministic transformations.", "Published fictional operational summaries."]}
+  ]
+}

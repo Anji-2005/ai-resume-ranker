@@ -31,6 +31,7 @@ STATUS_BADGES = {
     "completed": ":green-badge[Reviewed]",
     "failed": ":red-badge[Failed]",
     "running": ":blue-badge[Running]",
+    "queued": ":gray-badge[Queued]",
     "approved": ":green-badge[Notes approved]",
     "rejected": ":gray-badge[Notes rejected]",
 }
