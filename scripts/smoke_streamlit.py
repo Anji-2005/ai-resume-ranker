@@ -44,7 +44,7 @@ def main():
             at.sidebar.radio(key="nav").set_value(page).run()
             assert not at.exception, (page, at.exception)
         at.sidebar.radio(key="nav").set_value("AI Candidate Search").run()
-        at.text_input(key="search_query").input("Python PostgreSQL").run()
+        at.text_input(key="search_query").input("Python PostgreSQL")
         next(button for button in at.button if button.label == "Search").click().run()
         assert not at.exception, at.exception
         rendered = " ".join(str(element.value) for element in at.markdown)

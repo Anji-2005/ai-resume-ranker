@@ -193,7 +193,7 @@ def test_library_shows_real_persisted_ingestion_status(connected):
 def test_search_shows_provenance_scores_and_relevance_disclaimer(connected):
     ingested = seed(connected["client"])
     at = run_page("AI Candidate Search")
-    at.text_input(key="search_query").input("Python services").run()
+    at.text_input(key="search_query").input("Python services")
     click(at, "Search")
     assert at.exception == []
     body = texts(at)
@@ -204,7 +204,7 @@ def test_search_shows_provenance_scores_and_relevance_disclaimer(connected):
 def test_ask_renders_verified_citations_with_exact_excerpts(connected):
     seed(connected["client"])
     at = run_page("Ask AI")
-    at.text_area(key="ask_question").input("Which resume mentions Python?").run()
+    at.text_area(key="ask_question").input("Which resume mentions Python?")
     click(at, "Ask")
     assert at.exception == []
     body = texts(at)
@@ -225,9 +225,9 @@ def test_ask_disabled_without_generation_policy(connected):
 def test_brief_generation_review_and_history(connected):
     ingested = seed(connected["client"])
     at = run_page("Recruiter Briefs")
-    at.multiselect(key="brief_documents").set_value([str(ingested.document_id)]).run()
-    at.text_area(key="brief_description").input("Python backend engineer").run()
-    at.text_area(key="brief_required").input("Python, Kubernetes").run()
+    at.multiselect(key="brief_documents").set_value([str(ingested.document_id)])
+    at.text_area(key="brief_description").input("Python backend engineer")
+    at.text_area(key="brief_required").input("Python, Kubernetes")
     click(at, "Generate briefs for review")
     assert at.exception == []
     body = texts(at)
@@ -235,7 +235,7 @@ def test_brief_generation_review_and_history(connected):
     assert "not the applicant" in body and "Editing generated briefs is not supported" in body
     workflow_id = connected["client"].list_workflows().workflows[0].workflow_id
 
-    at.text_area(key=f"review_note_{workflow_id}").input("Citations checked").run()
+    at.text_area(key=f"review_note_{workflow_id}").input("Citations checked")
     click(at, "Submit review")
     assert at.exception == []
     assert "were **approved** by a reviewer" in texts(at)
@@ -250,10 +250,10 @@ def test_brief_generation_review_and_history(connected):
 def test_investigation_setup_trace_report_review_and_reopen(connected):
     ingested = seed(connected["client"])
     at = run_page("AI Investigations")
-    at.multiselect(key="investigation_documents").set_value([str(ingested.document_id)]).run()
-    at.text_area(key="investigation_objective").input("Investigate Python API evidence").run()
-    at.text_area(key="investigation_job_description").input("Fictional backend platform role").run()
-    at.text_area(key="investigation_requirements").input("Python, Kubernetes").run()
+    at.multiselect(key="investigation_documents").set_value([str(ingested.document_id)])
+    at.text_area(key="investigation_objective").input("Investigate Python API evidence")
+    at.text_area(key="investigation_job_description").input("Fictional backend platform role")
+    at.text_area(key="investigation_requirements").input("Python, Kubernetes")
     click(at, "Start Investigation")
     assert at.exception == []
     body = texts(at)
@@ -268,7 +268,7 @@ def test_investigation_setup_trace_report_review_and_reopen(connected):
     assert {"search_evidence", "check_requirements", "draft_investigation"} <= set(trace["Tool"].tolist())
 
     investigation_id = connected["client"].list_investigations().investigations[0].investigation_id
-    at.text_area(key=f"investigation_comment_{investigation_id}").input("Verified fictional evidence").run()
+    at.text_area(key=f"investigation_comment_{investigation_id}").input("Verified fictional evidence")
     click(at, "Submit investigation review")
     assert at.exception == []
     assert "were **approved** by a reviewer" in texts(at)
